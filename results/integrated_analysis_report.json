@@ -1,0 +1,400 @@
+{
+  "analysis_date": null,
+  "total_analyzed": 1,
+  "high_risk_apps": [
+    "Uu.apk"
+  ],
+  "medium_risk_apps": [],
+  "low_risk_apps": [],
+  "results": [
+    {
+      "apk_file": "Uu.apk",
+      "package_name": "com.netease.uu",
+      "static_analysis": {
+        "package_name": "com.netease.uu",
+        "permissions": [
+          "android.permission.ACCESS_NETWORK_STATE",
+          "android.permission.READ_PHONE_STATE",
+          "android.permission.INTERNET",
+          "android.permission.REQUEST_INSTALL_PACKAGES",
+          "android.permission.ACCESS_WIFI_STATE",
+          "android.permission.SYSTEM_ALERT_WINDOW",
+          "android.permission.QUERY_ALL_PACKAGES",
+          "android.permission.CHANGE_NETWORK_STATE",
+          "android.permission.READ_LOGS",
+          "android.permission.PACKAGE_USAGE_STATS",
+          "android.permission.READ_EXTERNAL_STORAGE",
+          "android.permission.WRITE_EXTERNAL_STORAGE",
+          "android.permission.CAMERA",
+          "com.android.launcher.permission.INSTALL_SHORTCUT",
+          "android.permission.FOREGROUND_SERVICE",
+          "android.permission.CHANGE_WIFI_STATE",
+          "android.permission.VIBRATE",
+          "com.android.vending.BILLING",
+          "android.permission.GET_PACKAGE_SIZE",
+          "com.netease.uu.permission.PROCESS_PUSH_MSG",
+          "android.permission.GET_TASKS",
+          "freemme.permission.msa",
+          "com.asus.msa.SupplementaryDID.ACCESS"
+        ],
+        "activities": [
+          "com.netease.uu.activity.CountryCodeSelectActivity",
+          "com.netease.uu.community.activity.CommunityActivity",
+          "com.netease.uu.activity.LaunchActivity",
+          "com.netease.uu.activity.GameLoginAssistantActivity",
+          "com.netease.uu.activity.FeedbackActivity",
+          "com.netease.uu.dialog.CommentCommonDialog",
+          "com.netease.uu.activity.OCRProjectionPermissionActivity",
+          "com.netease.uu.activity.RegisterGoogleAccountActivity",
+          "com.netease.uu.community.activity.CollectionActivity",
+          "com.netease.uu.dialog.UUGeneralDialog",
+          "com.netease.uu.activity.FaceDetectActivity",
+          "com.netease.uu.dialog.PermissionDialog",
+          "com.netease.uu.activity.LogExportActivity",
+          "com.netease.uu.activity.EditProfilePhoneActivity",
+          "com.netease.uu.activity.ChooseImageActivity",
+          "com.netease.uu.activity.EditNicknameActivity",
+          "com.netease.uu.activity.ChosenImagePreviewActivity",
+          "com.netease.uu.activity.EditPhoneActivity",
+          "com.netease.uu.activity.UUSchemeActivity",
+          "com.netease.uu.activity.AboutUsActivity",
+          "com.netease.uu.activity.MessagePushSettingActivity",
+          "com.netease.uu.community.activity.PostsCommentDetailActivity",
+          "com.netease.uu.activity.BatchShortcutActivity",
+          "com.netease.uu.activity.VideoPlayOptionsActivity",
+          "com.netease.uu.activity.BoostDetailActivity2",
+          "com.netease.uu.community.activity.PostEditorActivity",
+          "com.netease.uu.activity.ShortcutActivity",
+          "com.netease.uu.activity.ScreenObscuredActivity",
+          "com.netease.uu.activity.RequestPermissionActivity",
+          "com.netease.uu.activity.SettingActivity",
+          "com.netease.uu.activity.AppUpdateActivity",
+          "com.alipay.sdk.app.H5PayActivity",
+          "com.alipay.sdk.app.H5AuthActivity",
+          "com.netease.uu.activity.WebViewActivity",
+          "com.alipay.sdk.app.PayResultActivity",
+          "com.netease.uu.community.activity.LikeMessageActivity",
+          "com.netease.uu.activity.SearchGameActivity",
+          "com.alipay.sdk.app.AlipayResultActivity",
+          "com.netease.uu.activity.PickPackageActivity",
+          "com.alipay.sdk.app.H5OpenAuthActivity",
+          "com.netease.uu.activity.ScoringEditorActivity",
+          "com.netease.uu.activity.CropAvatarActivity",
+          "com.huawei.hms.activity.BridgeActivity",
+          "com.netease.uu.activity.ScoringListActivity",
+          "com.netease.uu.activity.ImageViewerActivity",
+          "com.ps.share.ShareProActivity",
+          "com.netease.uu.activity.SocialLoginActivity",
+          "com.ps.share.utils.permission.RequestPermissionActivity",
+          "com.netease.uu.activity.HardCoreAlbumActivity",
+          "com.netease.uu.activity.QuickLoginActivity",
+          "com.tencent.tauth.AuthActivity",
+          "com.netease.uu.activity.MessageActivity",
+          "com.tencent.connect.common.AssistActivity",
+          "com.netease.uu.community.activity.FollowCommunityActivity",
+          "com.netease.uu.activity.BoostHintActivity",
+          "com.google.android.gms.common.api.GoogleApiActivity",
+          "com.netease.uu.activity.BuiltInAvatarActivity",
+          "com.netease.uu.activity.LoginActivity",
+          "com.android.billingclient.api.ProxyBillingActivity",
+          "com.netease.uu.community.activity.SearchCommunityActivity",
+          "com.netease.uu.boost.MainActivity",
+          "com.netease.uu.wxapi.WXEntryActivity",
+          "com.sina.weibo.sdk.web.WebActivity",
+          "com.netease.uu.pay.weixin.WeixinPayCallbackActivity",
+          "com.sina.weibo.sdk.share.ShareTransActivity",
+          "com.netease.uu.community.activity.AllCommunityActivity",
+          "com.netease.uu.community.activity.FavoriteMessageActivity",
+          "com.netease.uu.activity.EditProfileActivity",
+          "com.netease.uu.activity.PostsMediaViewerActivity",
+          "com.netease.uu.activity.GameImageViewerActivity",
+          "com.netease.uu.album.GameAlbumActivity",
+          "com.netease.uu.activity.UpCodeVerifyActivity",
+          "com.netease.uu.activity.GameDetailActivity",
+          "com.netease.uu.activity.UZoneDisplayListActivity"
+        ],
+        "services": [
+          "com.liulishuo.filedownloader.services.FileDownloadService$SharedMainProcessService",
+          "com.google.android.datatransport.runtime.backends.TransportBackendDiscovery",
+          "com.netease.uu.vpn.UUVpnService",
+          "androidx.room.MultiInstanceInvalidationService",
+          "com.netease.cloud.nos.yidun.service.MonitorService",
+          "com.liulishuo.filedownloader.services.FileDownloadService$SeparateProcessService",
+          "com.google.android.datatransport.runtime.scheduling.jobscheduling.JobInfoSchedulerService",
+          "com.google.mlkit.common.internal.MlKitComponentDiscoveryService",
+          "com.netease.uu.utils.OCRService",
+          "com.liulishuo.filedownloader.services.FileDownloadJobService"
+        ],
+        "receivers": [
+          "com.netease.ps.unipush.huawei.HuaweiPushReceiver",
+          "com.google.android.datatransport.runtime.scheduling.jobscheduling.AlarmManagerSchedulerBroadcastReceiver",
+          "androidx.profileinstaller.ProfileInstallReceiver",
+          "com.netease.cloud.nos.yidun.receiver.ConnectionChangeReceiver",
+          "com.netease.uu.receiver.CheckGameUpgradeReceiver",
+          "com.netease.uu.receiver.QoSKeepAliveReceiver"
+        ],
+        "providers": [
+          "com.netease.uu.utils.UUProvider",
+          "com.sina.weibo.sdk.content.FileProvider",
+          "androidx.core.content.FileProvider",
+          "com.ps.share.ShareFileProvider",
+          "androidx.startup.InitializationProvider",
+          "io.sentry.android.core.SentryPerformanceProvider",
+          "com.google.mlkit.common.internal.MlKitInitProvider",
+          "io.sentry.android.core.SentryInitProvider"
+        ],
+        "total_permissions": 23,
+        "permission_analysis": {
+          "all_permissions": [
+            "android.permission.ACCESS_NETWORK_STATE",
+            "android.permission.READ_PHONE_STATE",
+            "android.permission.INTERNET",
+            "android.permission.REQUEST_INSTALL_PACKAGES",
+            "android.permission.ACCESS_WIFI_STATE",
+            "android.permission.SYSTEM_ALERT_WINDOW",
+            "android.permission.QUERY_ALL_PACKAGES",
+            "android.permission.CHANGE_NETWORK_STATE",
+            "android.permission.READ_LOGS",
+            "android.permission.PACKAGE_USAGE_STATS",
+            "android.permission.READ_EXTERNAL_STORAGE",
+            "android.permission.WRITE_EXTERNAL_STORAGE",
+            "android.permission.CAMERA",
+            "com.android.launcher.permission.INSTALL_SHORTCUT",
+            "android.permission.FOREGROUND_SERVICE",
+            "android.permission.CHANGE_WIFI_STATE",
+            "android.permission.VIBRATE",
+            "com.android.vending.BILLING",
+            "android.permission.GET_PACKAGE_SIZE",
+            "com.netease.uu.permission.PROCESS_PUSH_MSG",
+            "android.permission.GET_TASKS",
+            "freemme.permission.msa",
+            "com.asus.msa.SupplementaryDID.ACCESS"
+          ],
+          "dangerous_permissions": [
+            "android.permission.READ_PHONE_STATE",
+            "android.permission.READ_EXTERNAL_STORAGE",
+            "android.permission.WRITE_EXTERNAL_STORAGE",
+            "android.permission.CAMERA"
+          ],
+          "normal_permissions": [
+            "android.permission.ACCESS_NETWORK_STATE",
+            "android.permission.INTERNET",
+            "android.permission.REQUEST_INSTALL_PACKAGES",
+            "android.permission.ACCESS_WIFI_STATE",
+            "android.permission.SYSTEM_ALERT_WINDOW",
+            "android.permission.QUERY_ALL_PACKAGES",
+            "android.permission.CHANGE_NETWORK_STATE",
+            "android.permission.READ_LOGS",
+            "android.permission.PACKAGE_USAGE_STATS",
+            "com.android.launcher.permission.INSTALL_SHORTCUT",
+            "android.permission.FOREGROUND_SERVICE",
+            "android.permission.CHANGE_WIFI_STATE",
+            "android.permission.VIBRATE",
+            "com.android.vending.BILLING",
+            "android.permission.GET_PACKAGE_SIZE",
+            "com.netease.uu.permission.PROCESS_PUSH_MSG",
+            "android.permission.GET_TASKS",
+            "freemme.permission.msa",
+            "com.asus.msa.SupplementaryDID.ACCESS"
+          ],
+          "risk_levels": {
+            "低": [
+              "android.permission.ACCESS_NETWORK_STATE",
+              "android.permission.INTERNET",
+              "android.permission.CHANGE_NETWORK_STATE",
+              "android.permission.FOREGROUND_SERVICE",
+              "android.permission.CHANGE_WIFI_STATE",
+              "android.permission.VIBRATE"
+            ],
+            "中": [
+              "android.permission.ACCESS_WIFI_STATE",
+              "com.android.vending.BILLING",
+              "android.permission.GET_PACKAGE_SIZE",
+              "android.permission.GET_TASKS"
+            ],
+            "中高": [
+              "android.permission.SYSTEM_ALERT_WINDOW",
+              "android.permission.QUERY_ALL_PACKAGES",
+              "com.netease.uu.permission.PROCESS_PUSH_MSG"
+            ],
+            "高": [
+              "android.permission.READ_EXTERNAL_STORAGE",
+              "android.permission.WRITE_EXTERNAL_STORAGE"
+            ],
+            "极高": [
+              "android.permission.READ_PHONE_STATE",
+              "android.permission.REQUEST_INSTALL_PACKAGES",
+              "android.permission.READ_LOGS",
+              "android.permission.PACKAGE_USAGE_STATS",
+              "android.permission.CAMERA",
+              "com.android.launcher.permission.INSTALL_SHORTCUT",
+              "freemme.permission.msa",
+              "com.asus.msa.SupplementaryDID.ACCESS"
+            ]
+          },
+          "high_risk_permissions": [
+            "android.permission.SYSTEM_ALERT_WINDOW",
+            "android.permission.QUERY_ALL_PACKAGES",
+            "com.netease.uu.permission.PROCESS_PUSH_MSG",
+            "android.permission.READ_EXTERNAL_STORAGE",
+            "android.permission.WRITE_EXTERNAL_STORAGE",
+            "android.permission.READ_PHONE_STATE",
+            "android.permission.REQUEST_INSTALL_PACKAGES",
+            "android.permission.READ_LOGS",
+            "android.permission.PACKAGE_USAGE_STATS",
+            "android.permission.CAMERA",
+            "com.android.launcher.permission.INSTALL_SHORTCUT",
+            "freemme.permission.msa",
+            "com.asus.msa.SupplementaryDID.ACCESS"
+          ],
+          "permission_details": [
+            {
+              "name": "android.permission.ACCESS_NETWORK_STATE",
+              "risk_level": "低（自动检测）",
+              "main_risk_level": "低",
+              "is_dangerous": false
+            },
+            {
+              "name": "android.permission.READ_PHONE_STATE",
+              "risk_level": "极高（个人信息）",
+              "main_risk_level": "极高",
+              "is_dangerous": true
+            },
+            {
+              "name": "android.permission.INTERNET",
+              "risk_level": "低",
+              "main_risk_level": "低",
+              "is_dangerous": false
+            },
+            {
+              "name": "android.permission.REQUEST_INSTALL_PACKAGES",
+              "risk_level": "极高（自动检测）",
+              "main_risk_level": "极高",
+              "is_dangerous": false
+            },
+            {
+              "name": "android.permission.ACCESS_WIFI_STATE",
+              "risk_level": "中",
+              "main_risk_level": "中",
+              "is_dangerous": false
+            },
+            {
+              "name": "android.permission.SYSTEM_ALERT_WINDOW",
+              "risk_level": "中高",
+              "main_risk_level": "中高",
+              "is_dangerous": false
+            },
+            {
+              "name": "android.permission.QUERY_ALL_PACKAGES",
+              "risk_level": "中高（行为画像）",
+              "main_risk_level": "中高",
+              "is_dangerous": false
+            },
+            {
+              "name": "android.permission.CHANGE_NETWORK_STATE",
+              "risk_level": "低（自动检测）",
+              "main_risk_level": "低",
+              "is_dangerous": false
+            },
+            {
+              "name": "android.permission.READ_LOGS",
+              "risk_level": "极高（高危）",
+              "main_risk_level": "极高",
+              "is_dangerous": false
+            },
+            {
+              "name": "android.permission.PACKAGE_USAGE_STATS",
+              "risk_level": "极高（隐私）",
+              "main_risk_level": "极高",
+              "is_dangerous": false
+            },
+            {
+              "name": "android.permission.READ_EXTERNAL_STORAGE",
+              "risk_level": "高（个人信息）",
+              "main_risk_level": "高",
+              "is_dangerous": true
+            },
+            {
+              "name": "android.permission.WRITE_EXTERNAL_STORAGE",
+              "risk_level": "高（个人信息）",
+              "main_risk_level": "高",
+              "is_dangerous": true
+            },
+            {
+              "name": "android.permission.CAMERA",
+              "risk_level": "极高（隐私）",
+              "main_risk_level": "极高",
+              "is_dangerous": true
+            },
+            {
+              "name": "com.android.launcher.permission.INSTALL_SHORTCUT",
+              "risk_level": "极高（自动检测）",
+              "main_risk_level": "极高",
+              "is_dangerous": false
+            },
+            {
+              "name": "android.permission.FOREGROUND_SERVICE",
+              "risk_level": "低（自动检测）",
+              "main_risk_level": "低",
+              "is_dangerous": false
+            },
+            {
+              "name": "android.permission.CHANGE_WIFI_STATE",
+              "risk_level": "低（自动检测）",
+              "main_risk_level": "低",
+              "is_dangerous": false
+            },
+            {
+              "name": "android.permission.VIBRATE",
+              "risk_level": "低（自动检测）",
+              "main_risk_level": "低",
+              "is_dangerous": false
+            },
+            {
+              "name": "com.android.vending.BILLING",
+              "risk_level": "中（自定义权限）",
+              "main_risk_level": "中",
+              "is_dangerous": false
+            },
+            {
+              "name": "android.permission.GET_PACKAGE_SIZE",
+              "risk_level": "中（自动检测）",
+              "main_risk_level": "中",
+              "is_dangerous": false
+            },
+            {
+              "name": "com.netease.uu.permission.PROCESS_PUSH_MSG",
+              "risk_level": "中高（自定义权限）",
+              "main_risk_level": "中高",
+              "is_dangerous": false
+            },
+            {
+              "name": "android.permission.GET_TASKS",
+              "risk_level": "中（自动检测）",
+              "main_risk_level": "中",
+              "is_dangerous": false
+            },
+            {
+              "name": "freemme.permission.msa",
+              "risk_level": "极高（自动检测）",
+              "main_risk_level": "极高",
+              "is_dangerous": false
+            },
+            {
+              "name": "com.asus.msa.SupplementaryDID.ACCESS",
+              "risk_level": "极高（自动检测）",
+              "main_risk_level": "极高",
+              "is_dangerous": false
+            }
+          ]
+        },
+        "apk_file": "Uu.apk"
+      },
+      "risk_assessment": {
+        "static_score": 21,
+        "total_score": 21,
+        "risk_level": "high"
+      }
+    }
+  ]
+}
