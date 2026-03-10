@@ -1,8 +1,9 @@
-#综合分析系统 - 专注于静态分析
+#综合分析系统 - 静态和动态分析
 import json
 import os
-from typing import Dict, List
+from typing import Dict, List, Optional
 from static_analysis.apk_analyzer import APKAnalyzer, APKBatchAnalyzer
+from dynamic_analysis.analyzer import DynamicAnalyzer, DynamicBatchAnalyzer
 
 class IntegratedAnalyzer:
     def __init__(self, samples_dir: str, results_dir: str = "results"):
@@ -11,6 +12,7 @@ class IntegratedAnalyzer:
         os.makedirs(results_dir, exist_ok=True)
         
         self.static_analyzer = APKBatchAnalyzer(samples_dir, results_dir)
+        self.dynamic_analyzer = DynamicBatchAnalyzer(samples_dir, results_dir)
         
         self.risk_levels = {
             'high': 5,
@@ -28,7 +30,17 @@ class IntegratedAnalyzer:
         print(f"\n静态分析完成，共分析 {len(static_results)} 个APK")
         return static_results
     
-    def calculate_risk_score(self, static_result: Dict) -> Dict:
+    def perform_dynamic_analysis(self) -> List[Dict]:
+        print("=" * 50)
+        print("开始动态分析")
+        print("=" * 50)
+        
+        dynamic_results = self.dynamic_analyzer.analyze_all()
+        
+        print(f"\n动态分析完成，共分析 {len(dynamic_results)} 个APK")
+        return dynamic_results
+    
+    def calculate_risk_score(self, static_result: Dict, dynamic_result: Optional[Dict] = None) -> Dict:
         # 基于静态分析计算风险评分
         dangerous_perms = static_result['permission_analysis']['dangerous_permissions']
         high_risk_perms = static_result['permission_analysis']['high_risk_permissions']
@@ -36,33 +48,54 @@ class IntegratedAnalyzer:
         # 危险权限每个2分，高风险权限每个1分
         static_score = len(dangerous_perms) * 2 + len(high_risk_perms) * 1
         
-        if static_score >= 10:
+        # 动态分析评分
+        dynamic_score = 0
+        if dynamic_result:
+            # 检测到的敏感API调用每个3分
+            sensitive_api_count = sum(len(calls) for calls in dynamic_result.get('sensitive_api_calls', {}).values())
+            dynamic_score = sensitive_api_count * 3
+            
+            # 网络流量异常每个2分
+            network_traffic_count = len(dynamic_result.get('network_traffic', []))
+            dynamic_score += network_traffic_count * 2
+        
+        total_score = static_score + dynamic_score
+        
+        if total_score >= 15:
             risk_level = 'high'
-        elif static_score >= 5:
+        elif total_score >= 8:
             risk_level = 'medium'
         else:
             risk_level = 'low'
         
         return {
             'static_score': static_score,
-            'total_score': static_score,
+            'dynamic_score': dynamic_score,
+            'total_score': total_score,
             'risk_level': risk_level
         }
     
-    def generate_integrated_report(self, static_results: List[Dict]) -> Dict:
+    def generate_integrated_report(self, static_results: List[Dict], dynamic_results: List[Dict]) -> Dict:
         print("\n" + "=" * 50)
         print("生成综合分析报告")
         print("=" * 50)
         
+        # 创建动态结果映射，便于查找
+        dynamic_result_map = {result['apk_file']: result for result in dynamic_results}
+        
         integrated_results = []
         
         for static_result in static_results:
-            risk_assessment = self.calculate_risk_score(static_result)
+            apk_file = static_result['apk_file']
+            dynamic_result = dynamic_result_map.get(apk_file)
+            
+            risk_assessment = self.calculate_risk_score(static_result, dynamic_result)
             
             integrated_result = {
                 'apk_file': static_result['apk_file'],
                 'package_name': static_result['package_name'],
                 'static_analysis': static_result,
+                'dynamic_analysis': dynamic_result,
                 'risk_assessment': risk_assessment
             }
             
@@ -106,9 +139,16 @@ class IntegratedAnalyzer:
         
         print("=" * 50)
     
-    def run_full_analysis(self):
+    def run_full_analysis(self, skip_dynamic: bool = False):
         static_results = self.perform_static_analysis()
-        report = self.generate_integrated_report(static_results)
+        
+        if skip_dynamic:
+            print("跳过动态分析")
+            dynamic_results = []
+        else:
+            dynamic_results = self.perform_dynamic_analysis()
+        
+        report = self.generate_integrated_report(static_results, dynamic_results)
         
         return report
 

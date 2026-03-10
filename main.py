@@ -1,8 +1,14 @@
 import os
 import sys
+import argparse
 from integrated_analysis import IntegratedAnalyzer
 
 def main():
+    # 解析命令行参数
+    parser = argparse.ArgumentParser(description='APP隐私权限检测与风险预警系统')
+    parser.add_argument('--skip-dynamic', action='store_true', help='跳过动态分析')
+    args = parser.parse_args()
+    
     print("=" * 60)
     print("APP隐私权限检测与风险预警系统")
     print("=" * 60)
@@ -22,7 +28,7 @@ def main():
     analyzer = IntegratedAnalyzer(samples_dir, results_dir)
     
     print("\n开始执行完整分析流程...")
-    report = analyzer.run_full_analysis()
+    report = analyzer.run_full_analysis(skip_dynamic=args.skip_dynamic)
     
     print("\n" + "=" * 60)
     print("分析完成！")
