@@ -6,7 +6,14 @@ import json
 from typing import Dict, List, Optional
 import re
 from tqdm import tqdm
-from dynamic_engine.frida_analyzer import EnhancedDynamicAnalyzer
+
+# 尝试导入 frida 分析器，如果失败则设置为 None
+try:
+    from dynamic_engine.frida_analyzer import EnhancedDynamicAnalyzer
+    frida_available = True
+except ImportError:
+    print("警告: Frida 模块未安装，将跳过 Frida 分析")
+    frida_available = False
 
 class DynamicAnalyzer:
     def __init__(self, apk_path: str, output_dir: str = "output"):
@@ -16,7 +23,7 @@ class DynamicAnalyzer:
         self.adb_path = self._find_adb()
         self.sensitive_apis = self._load_sensitive_apis()
         self.monitoring_logs = []
-        self.frida_analyzer = EnhancedDynamicAnalyzer(apk_path, output_dir)
+        self.frida_analyzer = EnhancedDynamicAnalyzer(apk_path, output_dir) if frida_available else None
         self.device_id = None
         self.app_pid = None
         
@@ -64,7 +71,6 @@ class DynamicAnalyzer:
         }
     
     def _run_adb_command(self, command: List[str], timeout: int = 10) -> Optional[str]:
-        """运行ADB命令"""
         try:
             full_command = [self.adb_path] + command
             proc = subprocess.Popen(full_command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
@@ -73,12 +79,11 @@ class DynamicAnalyzer:
             except subprocess.TimeoutExpired:
                 proc.kill()
                 stdout, stderr = proc.communicate()
-                print(f"ADB命令超时: {' '.join(full_command)}")
+                print(f"ADB命令超时，已终止: {' '.join(full_command)}")
                 return None
-
             if proc.returncode != 0:
                 print(f"ADB命令返回错误: {stderr.strip()}")
-                return None  
+                return None
             return stdout.strip()
         except Exception as e:
             print(f"执行ADB命令异常: {e}")
@@ -100,75 +105,48 @@ class DynamicAnalyzer:
             return False
     
     def _check_device_with_retry(self) -> bool:
-        """检查设备连接，带重试机制"""
         print("开始检查设备连接...")
-        
-        # 尝试重启ADB服务
-        print("尝试重启ADB服务...")
+        # 先直接检查设备是否已连接
+        if self.check_device_connected():
+            print("设备已连接，无需重启ADB")
+            return True
+
+        # 如果未连接，再尝试重启ADB服务
+        print("设备未连接，尝试重启ADB服务...")
         self._run_adb_command(["kill-server"])
-        time.sleep(1)
-        self._run_adb_command(["start-server"])
+        time.sleep(2)
+        self._run_adb_command(["start-server"], timeout=30)  # 增加超时到30秒
+        time.sleep(3)
+
+        # 主动连接夜神模拟器端口（根据你的实际端口修改）
+        simulator_port = "62026"  # 可从配置文件读取
+        self._run_adb_command(["connect", f"127.0.0.1:{simulator_port}"])
         time.sleep(2)
 
-         # 主动连接夜神模拟器端口
-        self._run_adb_command(["connect", "127.0.0.1:62001"])
-        time.sleep(2)
-        
-        # 尝试多次连接
-        max_retries = 2  # 减少重试次数
+        max_retries = 3
         for i in range(max_retries):
             print(f"尝试连接设备 ({i+1}/{max_retries})...")
             if self.check_device_connected():
                 return True
-            time.sleep(1)  # 减少等待时间
-        
+            time.sleep(2)
+
         print("无法连接到设备，请确保夜神模拟器已启动并授权调试")
-        print("提示: 请手动启动夜神模拟器，或跳过动态分析")
         return False
     
-    def install_apk(self) -> bool:
-        print(f"开始安装 APK: {self.apk_path}")
-        if not os.path.exists(self.apk_path):
-            print(f"错误: APK 文件不存在: {self.apk_path}")
-            return False
-
-        # 如果有包名，先卸载旧版本
-        if self.package_name:
-            print(f"卸载已存在的应用: {self.package_name}")
-            self._run_adb_command(["uninstall", self.package_name])
-            time.sleep(1)  # 等待卸载完成
-
-        # 安装 APK
+    def install_apk(self, timeout=120): # 增加超时时间
+        print(f"正在安装 APK: {self.apk_path}")
         try:
-            process = subprocess.Popen(
-                [self.adb_path, "install", "-r", self.apk_path],
-                stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True
-            )
-            for line in iter(process.stdout.readline, ''):
-                if line:
-                    print(line.strip())
-                    if "Success" in line:
-                        process.wait()
-                        print("APK 安装成功")
-                        # 安装后尝试获取包名
-                        self._get_package_name_from_device()
-                        return True
-                    elif "Failure" in line:
-                        process.wait()
-                        print("APK 安装失败")
-                        return False
-            process.wait()
-            if process.returncode == 0:
-                print("APK 安装成功")
-                # 安装后尝试获取包名
-                self._get_package_name_from_device()
+            # 增加 -t 和 -g 参数 (允许测试版本和授予所有运行权限)
+            cmd = [self.adb_path, 'install', '-r', '-t', '-g', self.apk_path]
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+            if result.returncode == 0:
+                print("安装成功")
                 return True
             else:
-                print(f"APK 安装失败，返回码: {process.returncode}")
+                print(f"安装失败: {result.stderr}")
                 return False
-
-        except Exception as e:
-            print(f"安装 APK 时出错: {e}")
+        except subprocess.TimeoutExpired:
+            print(f"安装超时 (超过 {timeout} 秒)，请检查设备连接或 APK 大小")
             return False
     
     def _find_aapt(self):
@@ -235,6 +213,27 @@ class DynamicAnalyzer:
             print(f"安装命令返回码: {result.returncode}")
             print(f"安装命令输出: {result.stdout}")
             print(f"安装命令错误: {result.stderr}")
+            
+            # 尝试从安装输出中提取包名
+            if "Success" in result.stdout:
+                # 安装成功，尝试使用pm path命令获取包名
+                apk_filename = os.path.basename(self.apk_path)
+                print(f"尝试使用pm path命令获取包名...")
+                # 遍历所有包名，找到对应APK的包名
+                packages_output = self._run_adb_command(["shell", "pm", "list", "packages", "-f"])
+                if packages_output:
+                    for line in packages_output.split('\n'):
+                        if line and apk_filename in line:
+                            # 匹配格式: package:/data/app/.../package.name-1/base.apk=package.name
+                            match = re.search(r'=(.*)$', line)
+                            if match:
+                                package_name = match.group(1)
+                                self.package_name = package_name
+                                print(f"从pm path输出获取到包名: {package_name}")
+                                # 更新Frida分析器的包名
+                                if self.frida_analyzer:
+                                    self.frida_analyzer.set_package_name(package_name)
+                                return package_name
         except Exception as e:
             print(f"重新安装时出错: {e}")
         
@@ -265,8 +264,9 @@ class DynamicAnalyzer:
                         self.package_name = package_name
                         print(f"从设备获取到包名: {package_name}")
                         # 更新Frida分析器的包名
-                        self.frida_analyzer.set_package_name(package_name)
-                        return
+                        if self.frida_analyzer:
+                            self.frida_analyzer.set_package_name(package_name)
+                        return package_name
             
             # 方法3：尝试获取最近安装的应用
             print("方法3: 尝试获取最近安装的应用...")
@@ -280,32 +280,48 @@ class DynamicAnalyzer:
                     print("第三方应用列表:")
                     for pkg in third_party_packages:
                         print(f"  {pkg}")
-                    # 直接取第一个第三方应用（假设是刚安装的）
-                    self.package_name = third_party_packages[0]
-                    print(f"获取到第三方应用包名: {self.package_name}")
-                    # 更新Frida分析器的包名
-                    self.frida_analyzer.set_package_name(self.package_name)
-                    return
+                    # 尝试找到与APK文件名相关的包名
+                    for pkg in third_party_packages:
+                        if apk_filename.lower() in pkg.lower():
+                            self.package_name = pkg
+                            print(f"获取到匹配的第三方应用包名: {self.package_name}")
+                            # 更新Frida分析器的包名
+                            if self.frida_analyzer:
+                                self.frida_analyzer.set_package_name(self.package_name)
+                            return self.package_name
+                    # 如果没有匹配的，取最后一个第三方应用（假设是刚安装的）
+                    if third_party_packages:
+                        self.package_name = third_party_packages[-1]
+                        print(f"获取到最近的第三方应用包名: {self.package_name}")
+                        # 更新Frida分析器的包名
+                        if self.frida_analyzer:
+                            self.frida_analyzer.set_package_name(self.package_name)
+                        return self.package_name
         
         print("无法从设备获取包名")
+        return None
 
 
     def start_app(self) -> bool:
+        # 如果包名未知，尝试从设备获取
         if not self.package_name:
-            print("包名未知，无法启动应用")
-            return False
+            print("包名未知，尝试从设备获取...")
+            self._get_package_name_from_device()
+            if not self.package_name:
+                print("无法获取包名，无法启动应用")
+                return False
 
         print(f"启动应用: {self.package_name}")
 
         # 清空 logcat 缓存，以便后续只捕获本次启动的日志
-        self._run_adb_command(["logcat", "-c"])
+        self._run_adb_command(["shell", "logcat", "-c"])
 
         # 尝试方法1：使用 monkey 启动（最通用）
         print("尝试使用 monkey 启动...")
         monkey_result = self._run_adb_command(["shell", "monkey", "-p", self.package_name, "-c", "android.intent.category.LAUNCHER", "1"])
         if monkey_result and "monkey" in monkey_result.lower():
             print("monkey 命令已执行，等待应用启动...")
-            time.sleep(3)  # 等待几秒让应用启动
+            time.sleep(5)  # 增加等待时间
             # 检查进程是否存在
             if self._is_app_running():
                 print("应用已成功启动 (通过 monkey)")
@@ -322,7 +338,7 @@ class DynamicAnalyzer:
             result = self._run_adb_command(cmd)
             if result and ("Starting:" in result or "Error" not in result):
                 print("am start 命令已执行")
-                time.sleep(3)
+                time.sleep(5)  # 增加等待时间
                 if self._is_app_running():
                     print("应用已成功启动 (通过 am start)")
                     return True
@@ -332,18 +348,53 @@ class DynamicAnalyzer:
         # 尝试方法3：使用 monkey 仅带包名（旧方式）
         print("尝试使用简单 monkey 命令...")
         self._run_adb_command(["shell", "monkey", "-p", self.package_name, "1"])
-        time.sleep(3)
+        time.sleep(5)  # 增加等待时间
         if self._is_app_running():
             print("应用已成功启动 (简单 monkey)")
             return True
 
+        # 尝试方法4：使用 am start 直接启动应用
+        print("尝试使用 am start 直接启动...")
+        result = self._run_adb_command(["shell", "am", "start", "-a", "android.intent.action.MAIN", "-c", "android.intent.category.LAUNCHER", "-n", f"{self.package_name}/.MainActivity"])
+        time.sleep(5)
+        if self._is_app_running():
+            print("应用已成功启动 (通过 am start 直接启动)")
+            return True
+
+        # 尝试方法5：使用 am start 不带具体 Activity
+        print("尝试使用 am start 不带具体 Activity...")
+        result = self._run_adb_command(["shell", "am", "start", "-a", "android.intent.action.MAIN", "-c", "android.intent.category.LAUNCHER", "-p", self.package_name])
+        time.sleep(5)
+        if self._is_app_running():
+            print("应用已成功启动 (通过 am start 不带具体 Activity)")
+            return True
+
         # 所有方法都失败，输出 logcat 以便分析
         print("\n所有启动方法均失败，获取最近 20 行 logcat 日志:")
-        logcat = self._run_adb_command(["logcat", "-d", "-t", "20"])
+        logcat = self._run_adb_command(["shell", "logcat", "-d", "-t", "20"])
         if logcat:
             print(logcat)
         else:
             print("无法获取 logcat 日志")
+
+        # 检查logcat中是否有应用启动的迹象
+        if logcat:
+            # 检查包名是否在日志中
+            if self.package_name in logcat:
+                print("从logcat中检测到应用启动迹象，认为启动成功")
+                return True
+            # 检查是否有应用启动相关的关键词
+            start_keywords = ["ActivityManager: Displayed", "ActivityManager: Start proc", "ActivityManager: Launching"]
+            for keyword in start_keywords:
+                if keyword in logcat:
+                    print(f"从logcat中检测到应用启动关键词 '{keyword}'，认为启动成功")
+                    return True
+
+        # 最后尝试：直接检查应用是否在运行（可能之前的检查时机不对）
+        print("最后尝试：再次检查应用是否在运行...")
+        if self._is_app_running():
+            print("应用已成功启动（最后检查）")
+            return True
 
         return False
 
@@ -370,9 +421,11 @@ class DynamicAnalyzer:
 
     def _is_app_running(self) -> bool:
         """检查应用进程是否正在运行"""
+        # 方法1：使用ps命令检查进程
         output = self._run_adb_command(["shell", "ps"])
         if output:
             for line in output.split('\n'):
+                # 检查包名是否在进程列表中
                 if self.package_name in line:
                     # 提取PID
                     parts = line.split()
@@ -380,6 +433,19 @@ class DynamicAnalyzer:
                         self.app_pid = parts[1]
                         print(f"应用正在运行，PID: {self.app_pid}")
                     return True
+        
+        # 方法2：使用ps命令的grep功能（更可靠）
+        output = self._run_adb_command(["shell", "ps", "|", "grep", self.package_name])
+        if output and self.package_name in output:
+            print(f"应用正在运行（通过grep）")
+            return True
+        
+        # 方法3：检查logcat中是否有应用启动成功的信息
+        logcat = self._run_adb_command(["shell", "logcat", "-d", "-t", "10"])
+        if logcat and f"Displayed {self.package_name}/" in logcat:
+            print(f"应用已启动成功（通过logcat）")
+            return True
+        
         return False
     
     def simulate_user_interactions(self) -> bool:
@@ -568,39 +634,31 @@ class DynamicAnalyzer:
         print("开始Frida动态行为监控...")
         
         if not self.package_name:
-            print("包名未知，跳过Frida分析")
-            return {
-                "error": "包名未知，无法执行Frida分析"
-            }
+            return {"error": "包名未知，无法执行Frida分析"}
+        
+        if not self.frida_analyzer:
+            return {"error": "Frida 模块未安装，跳过 Frida 分析"}
         
         try:
-            # 检查应用是否正在运行
+            # 即使 _is_app_running() 返回 False，也不要直接退出
+            # 因为在 Nox 模拟器上，某些进程检查方法可能不准
             if not self._is_app_running():
                 print("应用未运行，尝试启动应用...")
-                if not self.start_app():
-                    print("无法启动应用，跳过Frida分析")
-                    return {
-                        "error": "应用未运行，无法执行Frida分析"
-                    }
+                self.start_app() # 尝试启动
+                time.sleep(3) # 等待缓冲
             
-            # 执行Frida分析，持续30秒
+            # 调用 frida_analyzer 的执行方法
+            # 注意：这里我们让 frida_analyzer 内部处理进程是否存在的问题
             frida_results = self.frida_analyzer.perform_frida_analysis(duration=30)
             
-            # 获取分析摘要
             frida_summary = self.frida_analyzer.get_frida_summary()
-            
-            print(f"Frida分析完成: 监控到 {frida_summary.get('total_api_calls', 0)} 次API调用")
-            print(f"已Hook的API数量: {frida_summary.get('total_hooked_apis', 0)}")
-            
             return {
                 "results": frida_results,
                 "summary": frida_summary
             }
         except Exception as e:
             print(f"执行Frida分析时出错: {e}")
-            return {
-                "error": str(e)
-            }
+            return {"error": str(e)}
     
     def perform_dynamic_analysis(self) -> Dict:
         """执行完整的动态分析"""

@@ -127,15 +127,23 @@ class EnhancedDynamicAnalyzer:
             }
         
         # 尝试正常启动Hook
+        print("[Frida] 尝试启动Hook...")
         if not self.frida_analyzer.start_hook():
             # 尝试使用spawn方式启动
             print("[Frida] 尝试使用spawn方式启动Hook...")
             if not self.frida_analyzer.start_hook(spawn=True):
+                print("[Frida] Frida Hook启动失败，跳过Frida分析")
                 return {
-                    "error": "无法启动Frida Hook"
+                    "error": "无法启动Frida Hook，已跳过Frida分析"
                 }
         
-        return self.frida_analyzer.monitor(duration)
+        try:
+            return self.frida_analyzer.monitor(duration)
+        except Exception as e:
+            print(f"[Frida] 执行Frida分析时出错: {e}")
+            return {
+                "error": f"执行Frida分析时出错: {str(e)}"
+            }
     
     def get_frida_summary(self) -> Dict:
         """获取Frida分析摘要"""

@@ -2,9 +2,16 @@
 import os
 import json
 import pandas as pd
+import logging
 from typing import Dict, List, Optional, Tuple
 from pathlib import Path
 from androguard.core import apk
+
+# 禁用androguard的debug日志
+logging.basicConfig(level=logging.INFO)
+for logger_name in logging.Logger.manager.loggerDict:
+    if 'androguard' in logger_name:
+        logging.getLogger(logger_name).setLevel(logging.INFO)
 
 class APKAnalyzer:
     def __init__(self, apk_path: str, output_dir: str = "output"):

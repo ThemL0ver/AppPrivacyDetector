@@ -19,8 +19,8 @@ class HookManager:
         """连接到设备"""
         print("[HookManager] 正在连接设备...")
         try:
-            # 尝试连接夜神模拟器
-            self.device = frida.get_device_manager().add_remote_device("127.0.0.1:62001")
+            # 尝试连接夜神模拟器 (新端口)
+            self.device = frida.get_device_manager().add_remote_device("127.0.0.1:62026")
             print("[HookManager] 成功连接到设备")
             return True
         except Exception as e:
@@ -66,22 +66,26 @@ class HookManager:
         # 尝试使用PID附加
         try:
             print("[HookManager] 尝试通过PID附加...")
-            # 获取应用的PID
+            # 获取应用的PID - 修复命令执行问题
             import subprocess
-            result = subprocess.run(["adb", "shell", "ps", "|", "grep", self.package_name], 
-                                  capture_output=True, text=True)
+            # 使用正确的方式执行带管道的命令
+            result = subprocess.run(["adb", "shell", "ps"], capture_output=True, text=True)
             if result.stdout:
                 lines = result.stdout.strip().split('\n')
                 for line in lines:
                     if self.package_name in line:
                         parts = line.split()
                         if len(parts) >= 2:
-                            pid = int(parts[1])
-                            print(f"[HookManager] 找到应用PID: {pid}")
-                            self.session = self.device.attach(pid)
-                            print("[HookManager] 成功通过PID附加到应用")
-                            self.is_running = True
-                            return True
+                            try:
+                                pid = int(parts[1])
+                                print(f"[HookManager] 找到应用PID: {pid}")
+                                self.session = self.device.attach(pid)
+                                print("[HookManager] 成功通过PID附加到应用")
+                                self.is_running = True
+                                return True
+                            except (ValueError, Exception) as e:
+                                print(f"[HookManager] 解析PID或附加失败: {e}")
+                                continue
         except Exception as e:
             print(f"[HookManager] 通过PID附加失败: {e}")
         

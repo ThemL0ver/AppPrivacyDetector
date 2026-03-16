@@ -156,215 +156,344 @@
 
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/js/bootstrap.bundle.min.js"></script>
     <script>
+        // 确保Chart.js加载完成
+        if (typeof Chart === 'undefined') {
+            console.error('Chart.js 未加载');
+        }
+        
         let riskChart, permissionChart, permissionRiskChart;
 
         async function loadSummary() {
-            const response = await fetch('/api/summary');
-            const data = await response.json();
-            
-            document.getElementById('total-analyzed').textContent = data.total_analyzed;
-            document.getElementById('high-risk').textContent = data.high_risk;
-            document.getElementById('medium-risk').textContent = data.medium_risk;
-            document.getElementById('low-risk').textContent = data.low_risk;
+            try {
+                const response = await fetch('/api/summary');
+                if (!response.ok) {
+                    throw new Error(`HTTP error! status: ${response.status}`);
+                }
+                const data = await response.json();
+                
+                document.getElementById('total-analyzed').textContent = data.total_analyzed || 0;
+                document.getElementById('high-risk').textContent = data.high_risk || 0;
+                document.getElementById('medium-risk').textContent = data.medium_risk || 0;
+                document.getElementById('low-risk').textContent = data.low_risk || 0;
+            } catch (error) {
+                console.error('加载摘要数据失败:', error);
+            }
         }
         
         async function loadRiskDistribution() {
-            const response = await fetch('/api/permission-risks');
-            const data = await response.json();
-            
-            // 转换权限风险数据为应用风险分布格式
-            const riskData = {
-                high_risk: data.risk_stats.high + data.risk_stats.very_high,
-                medium_risk: data.risk_stats.medium,
-                low_risk: data.risk_stats.low
-            };
-            
-            updateRiskChart(riskData);
+            try {
+                const response = await fetch('/api/permission-risks');
+                if (!response.ok) {
+                    throw new Error(`HTTP error! status: ${response.status}`);
+                }
+                const data = await response.json();
+                
+                // 确保数据结构正确
+                const riskStats = data.risk_stats || { high: 0, medium: 0, low: 0, very_high: 0 };
+                
+                // 转换权限风险数据为应用风险分布格式
+                const riskData = {
+                    high_risk: (riskStats.high || 0) + (riskStats.very_high || 0),
+                    medium_risk: riskStats.medium || 0,
+                    low_risk: riskStats.low || 0
+                };
+                
+                updateRiskChart(riskData);
+            } catch (error) {
+                console.error('加载风险分布数据失败:', error);
+                // 使用默认数据
+                updateRiskChart({ high_risk: 0, medium_risk: 0, low_risk: 0 });
+            }
         }
 
         async function loadApps() {
-            const response = await fetch('/api/apps');
-            const apps = await response.json();
-            
-            const tbody = document.getElementById('app-table');
-            tbody.innerHTML = '';
-            
-            apps.forEach(app => {
-                const row = document.createElement('tr');
-                row.className = `risk-${app.risk_level}`;
-                row.innerHTML = `
-                    <td>${app.apk_file}</td>
-                    <td>${app.package_name}</td>
-                    <td><span class="badge bg-${getRiskBadgeClass(app.risk_level)}">${app.risk_level}</span></td>
-                    <td>${app.risk_score}</td>
-                    <td>${app.permissions_count}</td>
-                    <td>${app.dangerous_permissions}</td>
-                    <td>${app.high_risk_permissions || 0}</td>
-                    <td>
-                        <button class="btn btn-sm btn-info" onclick="showAppDetail('${app.package_name}')">详情</button>
-                    </td>
-                `;
-                tbody.appendChild(row);
-            });
+            try {
+                const response = await fetch('/api/apps');
+                if (!response.ok) {
+                    throw new Error(`HTTP error! status: ${response.status}`);
+                }
+                const apps = await response.json() || [];
+                
+                const tbody = document.getElementById('app-table');
+                tbody.innerHTML = '';
+                
+                apps.forEach(app => {
+                    const row = document.createElement('tr');
+                    row.className = `risk-${app.risk_level || 'low'}`;
+                    row.innerHTML = `
+                        <td>${app.apk_file || '未知'}</td>
+                        <td>${app.package_name || '未知'}</td>
+                        <td><span class="badge bg-${getRiskBadgeClass(app.risk_level || 'low')}">${app.risk_level || '低'}</span></td>
+                        <td>${app.risk_score || 0}</td>
+                        <td>${app.permissions_count || 0}</td>
+                        <td>${app.dangerous_permissions || 0}</td>
+                        <td>${app.high_risk_permissions || 0}</td>
+                        <td>
+                            <button class="btn btn-sm btn-info" onclick="showAppDetail('${app.package_name || 'unknown'}')">详情</button>
+                        </td>
+                    `;
+                    tbody.appendChild(row);
+                });
+            } catch (error) {
+                console.error('加载应用列表失败:', error);
+                const tbody = document.getElementById('app-table');
+                tbody.innerHTML = '<tr><td colspan="8" class="text-center">加载应用列表失败</td></tr>';
+            }
         }
 
         async function loadPermissions() {
-            const response = await fetch('/api/permissions');
-            const permissions = await response.json();
-            
-            updatePermissionChart(permissions);
+            try {
+                const response = await fetch('/api/permissions');
+                if (!response.ok) {
+                    throw new Error(`HTTP error! status: ${response.status}`);
+                }
+                const permissions = await response.json() || [];
+                
+                updatePermissionChart(permissions);
+            } catch (error) {
+                console.error('加载权限统计失败:', error);
+                updatePermissionChart([]);
+            }
         }
 
         async function loadPermissionRisks() {
-            const response = await fetch('/api/permission-risks');
-            const data = await response.json();
-            
-            updatePermissionRiskChart(data.risk_stats);
-            updateHighRiskPermissions(data.permission_details);
+            try {
+                const response = await fetch('/api/permission-risks');
+                if (!response.ok) {
+                    throw new Error(`HTTP error! status: ${response.status}`);
+                }
+                const data = await response.json() || {};
+                
+                updatePermissionRiskChart(data.risk_stats || {});
+                updateHighRiskPermissions(data.permission_details || []);
+            } catch (error) {
+                console.error('加载权限风险数据失败:', error);
+                updatePermissionRiskChart({});
+                updateHighRiskPermissions([]);
+            }
         }
 
         function updateRiskChart(data) {
-            const ctx = document.getElementById('riskChart').getContext('2d');
-            
-            if (riskChart) {
-                riskChart.destroy();
-            }
-            
-            // 确保数据不为空
-            const highRisk = data.high_risk || 0;
-            const mediumRisk = data.medium_risk || 0;
-            const lowRisk = data.low_risk || 0;
-            
-            // 准备数据和标签
-            const labels = [];
-            const values = [];
-            const colors = [];
-            
-            if (highRisk > 0) {
-                labels.push('高风险');
-                values.push(highRisk);
-                colors.push('#dc3545');
-            }
-            
-            if (mediumRisk > 0) {
-                labels.push('中风险');
-                values.push(mediumRisk);
-                colors.push('#ffc107');
-            }
-            
-            if (lowRisk > 0) {
-                labels.push('低风险');
-                values.push(lowRisk);
-                colors.push('#198754');
-            }
-            
-            // 如果所有值都为0，添加默认数据
-            if (values.length === 0) {
-                labels.push('无数据');
-                values.push(1);
-                colors.push('#6c757d');
-            }
-            
-            riskChart = new Chart(ctx, {
-                type: 'pie',
-                data: {
-                    labels: labels,
-                    datasets: [{
-                        data: values,
-                        backgroundColor: colors
-                    }]
-                },
-                options: {
-                    responsive: true,
-                    plugins: {
-                        legend: {
-                            position: 'bottom'
+            try {
+                const ctx = document.getElementById('riskChart');
+                if (!ctx) {
+                    console.error('riskChart canvas not found');
+                    return;
+                }
+                
+                const canvasContext = ctx.getContext('2d');
+                if (!canvasContext) {
+                    console.error('Cannot get canvas context');
+                    return;
+                }
+                
+                if (riskChart) {
+                    riskChart.destroy();
+                }
+                
+                // 确保数据不为空
+                const highRisk = data.high_risk || 0;
+                const mediumRisk = data.medium_risk || 0;
+                const lowRisk = data.low_risk || 0;
+                
+                // 准备数据和标签
+                const labels = [];
+                const values = [];
+                const colors = [];
+                
+                if (highRisk > 0) {
+                    labels.push('高风险');
+                    values.push(highRisk);
+                    colors.push('#dc3545');
+                }
+                
+                if (mediumRisk > 0) {
+                    labels.push('中风险');
+                    values.push(mediumRisk);
+                    colors.push('#ffc107');
+                }
+                
+                if (lowRisk > 0) {
+                    labels.push('低风险');
+                    values.push(lowRisk);
+                    colors.push('#198754');
+                }
+                
+                // 如果所有值都为0，添加默认数据
+                if (values.length === 0) {
+                    labels.push('无数据');
+                    values.push(1);
+                    colors.push('#6c757d');
+                }
+                
+                riskChart = new Chart(canvasContext, {
+                    type: 'pie',
+                    data: {
+                        labels: labels,
+                        datasets: [{
+                            data: values,
+                            backgroundColor: colors
+                        }]
+                    },
+                    options: {
+                        responsive: true,
+                        plugins: {
+                            legend: {
+                                position: 'bottom'
+                            }
                         }
                     }
-                }
-            });
+                });
+            } catch (error) {
+                console.error('更新风险图表失败:', error);
+            }
         }
 
         function updatePermissionChart(permissions) {
-            const ctx = document.getElementById('permissionChart').getContext('2d');
-            
-            if (permissionChart) {
-                permissionChart.destroy();
-            }
-            
-            const labels = permissions.map(p => p[0].split('.').pop());
-            const data = permissions.map(p => p[1]);
-            
-            permissionChart = new Chart(ctx, {
-                type: 'bar',
-                data: {
-                    labels: labels,
-                    datasets: [{
-                        label: '使用次数',
-                        data: data,
-                        backgroundColor: '#0d6efd'
-                    }]
-                },
-                options: {
-                    responsive: true,
-                    indexAxis: 'y',
-                    plugins: {
-                        legend: {
-                            display: false
+            try {
+                const ctx = document.getElementById('permissionChart');
+                if (!ctx) {
+                    console.error('permissionChart canvas not found');
+                    return;
+                }
+                
+                const canvasContext = ctx.getContext('2d');
+                if (!canvasContext) {
+                    console.error('Cannot get canvas context');
+                    return;
+                }
+                
+                if (permissionChart) {
+                    permissionChart.destroy();
+                }
+                
+                let labels = [];
+                let data = [];
+                
+                if (permissions && permissions.length > 0) {
+                    labels = permissions.map(p => p[0] ? p[0].split('.').pop() : '未知');
+                    data = permissions.map(p => p[1] || 0);
+                } else {
+                    labels = ['无数据'];
+                    data = [0];
+                }
+                
+                permissionChart = new Chart(canvasContext, {
+                    type: 'bar',
+                    data: {
+                        labels: labels,
+                        datasets: [{
+                            label: '使用次数',
+                            data: data,
+                            backgroundColor: '#0d6efd'
+                        }]
+                    },
+                    options: {
+                        responsive: true,
+                        indexAxis: 'y',
+                        plugins: {
+                            legend: {
+                                display: false
+                            }
                         }
                     }
-                }
-            });
+                });
+            } catch (error) {
+                console.error('更新权限图表失败:', error);
+            }
         }
 
         function updatePermissionRiskChart(riskStats) {
-            const ctx = document.getElementById('permissionRiskChart').getContext('2d');
-            
-            if (permissionRiskChart) {
-                permissionRiskChart.destroy();
-            }
-            
-            permissionRiskChart = new Chart(ctx, {
-                type: 'bar',
-                data: {
-                    labels: ['低风险', '中风险', '中高风险', '高风险'],
-                    datasets: [{
-                        label: '权限数量',
-                        data: [riskStats.low, riskStats.medium, riskStats.high, riskStats.very_high],
-                        backgroundColor: ['#198754', '#0d6efd', '#ffc107', '#dc3545']
-                    }]
-                },
-                options: {
-                    responsive: true,
-                    plugins: {
-                        legend: {
-                            display: false
+            try {
+                const ctx = document.getElementById('permissionRiskChart');
+                if (!ctx) {
+                    console.error('permissionRiskChart canvas not found');
+                    return;
+                }
+                
+                const canvasContext = ctx.getContext('2d');
+                if (!canvasContext) {
+                    console.error('Cannot get canvas context');
+                    return;
+                }
+                
+                if (permissionRiskChart) {
+                    permissionRiskChart.destroy();
+                }
+                
+                // 确保riskStats对象存在且有必要的属性
+                const safeRiskStats = {
+                    low: riskStats.low || 0,
+                    medium: riskStats.medium || 0,
+                    high: riskStats.high || 0,
+                    very_high: riskStats.very_high || 0
+                };
+                
+                permissionRiskChart = new Chart(canvasContext, {
+                    type: 'bar',
+                    data: {
+                        labels: ['低风险', '中风险', '中高风险', '高风险'],
+                        datasets: [{
+                            label: '权限数量',
+                            data: [safeRiskStats.low, safeRiskStats.medium, safeRiskStats.high, safeRiskStats.very_high],
+                            backgroundColor: ['#198754', '#0d6efd', '#ffc107', '#dc3545']
+                        }]
+                    },
+                    options: {
+                        responsive: true,
+                        plugins: {
+                            legend: {
+                                display: false
+                            }
                         }
                     }
-                }
-            });
+                });
+            } catch (error) {
+                console.error('更新权限风险图表失败:', error);
+            }
         }
 
         function updateHighRiskPermissions(permissions) {
-            const tbody = document.getElementById('high-risk-permissions');
-            tbody.innerHTML = '';
-            
-            // 过滤出中高、高、极高风险的权限
-            const highRiskPerms = permissions.filter(p => 
-                p.main_risk_level === '中高' || 
-                p.main_risk_level === '高' || 
-                p.main_risk_level === '极高'
-            );
-            
-            highRiskPerms.forEach(perm => {
-                const row = document.createElement('tr');
-                const badgeClass = getRiskBadgeClass(perm.main_risk_level);
-                row.innerHTML = `
-                    <td>${perm.name.split('.').pop()}</td>
-                    <td><span class="badge bg-${badgeClass}">${perm.risk_level}</span></td>
-                `;
-                tbody.appendChild(row);
-            });
+            try {
+                const tbody = document.getElementById('high-risk-permissions');
+                if (!tbody) {
+                    console.error('high-risk-permissions table body not found');
+                    return;
+                }
+                
+                tbody.innerHTML = '';
+                
+                if (!permissions || permissions.length === 0) {
+                    tbody.innerHTML = '<tr><td colspan="2" class="text-center">无高风险权限数据</td></tr>';
+                    return;
+                }
+                
+                // 过滤出中高、高、极高风险的权限
+                const highRiskPerms = permissions.filter(p => 
+                    p && (p.main_risk_level === '中高' || 
+                    p.main_risk_level === '高' || 
+                    p.main_risk_level === '极高')
+                );
+                
+                if (highRiskPerms.length === 0) {
+                    tbody.innerHTML = '<tr><td colspan="2" class="text-center">无高风险权限</td></tr>';
+                    return;
+                }
+                
+                highRiskPerms.forEach(perm => {
+                    if (perm && perm.name) {
+                        const row = document.createElement('tr');
+                        const badgeClass = getRiskBadgeClass(perm.main_risk_level || 'low');
+                        row.innerHTML = `
+                            <td>${perm.name.split('.').pop()}</td>
+                            <td><span class="badge bg-${badgeClass}">${perm.risk_level || '未知'}</span></td>
+                        `;
+                        tbody.appendChild(row);
+                    }
+                });
+            } catch (error) {
+                console.error('更新高风险权限列表失败:', error);
+            }
         }
 
         function getRiskBadgeClass(riskLevel) {
@@ -382,57 +511,71 @@
         }
 
         async function showAppDetail(packageName) {
-            const response = await fetch(`/api/app/${packageName}`);
-            const app = await response.json();
-            
-            const content = document.getElementById('app-detail-content');
-            
-            // 构建权限详情HTML
-            let permissionsHtml = '';
-            if (app.static_analysis.permission_analysis.permission_details) {
-                permissionsHtml = '<h6>权限详情</h6><div class="row">';
-                app.static_analysis.permission_analysis.permission_details.forEach(perm => {
-                    const badgeClass = getRiskBadgeClass(perm.main_risk_level);
-                    permissionsHtml += `
-                        <div class="col-md-4 mb-2">
-                            <span class="badge bg-${badgeClass}">${perm.risk_level}</span>
-                            <span class="ms-2">${perm.name.split('.').pop()}</span>
+            try {
+                const response = await fetch(`/api/app/${packageName}`);
+                if (!response.ok) {
+                    throw new Error(`HTTP error! status: ${response.status}`);
+                }
+                const app = await response.json();
+                
+                const content = document.getElementById('app-detail-content');
+                if (!content) {
+                    console.error('app-detail-content not found');
+                    return;
+                }
+                
+                // 构建权限详情HTML
+                let permissionsHtml = '';
+                if (app.static_analysis && app.static_analysis.permission_analysis && app.static_analysis.permission_analysis.permission_details) {
+                    permissionsHtml = '<h6>权限详情</h6><div class="row">';
+                    app.static_analysis.permission_analysis.permission_details.forEach(perm => {
+                        const badgeClass = getRiskBadgeClass(perm.main_risk_level);
+                        permissionsHtml += `
+                            <div class="col-md-4 mb-2">
+                                <span class="badge bg-${badgeClass}">${perm.risk_level}</span>
+                                <span class="ms-2">${perm.name.split('.').pop()}</span>
+                            </div>
+                        `;
+                    });
+                    permissionsHtml += '</div>';
+                }
+                
+                content.innerHTML = `
+                    <div class="row">
+                        <div class="col-md-6">
+                            <h6>基本信息</h6>
+                            <p><strong>APK文件:</strong> ${app.apk_file || '未知'}</p>
+                            <p><strong>包名:</strong> ${app.package_name || '未知'}</p>
+                            <p><strong>风险等级:</strong> ${app.risk_assessment && app.risk_assessment.risk_level ? app.risk_assessment.risk_level : '未知'}</p>
+                            <p><strong>风险评分:</strong> ${app.risk_assessment && app.risk_assessment.total_score ? app.risk_assessment.total_score : '0'}</p>
                         </div>
-                    `;
-                });
-                permissionsHtml += '</div>';
+                        <div class="col-md-6">
+                            <h6>权限分析</h6>
+                            <p><strong>权限总数:</strong> ${app.static_analysis && app.static_analysis.total_permissions ? app.static_analysis.total_permissions : '0'}</p>
+                            <p><strong>危险权限数:</strong> ${app.static_analysis && app.static_analysis.permission_analysis && app.static_analysis.permission_analysis.dangerous_permissions ? app.static_analysis.permission_analysis.dangerous_permissions.length : '0'}</p>
+                            <p><strong>高风险权限数:</strong> ${app.static_analysis && app.static_analysis.permission_analysis && app.static_analysis.permission_analysis.high_risk_permissions ? app.static_analysis.permission_analysis.high_risk_permissions.length : '0'}</p>
+                        </div>
+                    </div>
+                    <hr>
+                    ${permissionsHtml}
+                `;
+                
+                const modal = new bootstrap.Modal(document.getElementById('appDetailModal'));
+                modal.show();
+            } catch (error) {
+                console.error('显示应用详情失败:', error);
             }
-            
-            content.innerHTML = `
-                <div class="row">
-                    <div class="col-md-6">
-                        <h6>基本信息</h6>
-                        <p><strong>APK文件:</strong> ${app.apk_file}</p>
-                        <p><strong>包名:</strong> ${app.package_name}</p>
-                        <p><strong>风险等级:</strong> ${app.risk_assessment.risk_level}</p>
-                        <p><strong>风险评分:</strong> ${app.risk_assessment.total_score}</p>
-                    </div>
-                    <div class="col-md-6">
-                        <h6>权限分析</h6>
-                        <p><strong>权限总数:</strong> ${app.static_analysis.total_permissions}</p>
-                        <p><strong>危险权限数:</strong> ${app.static_analysis.permission_analysis.dangerous_permissions.length}</p>
-                        <p><strong>高风险权限数:</strong> ${app.static_analysis.permission_analysis.high_risk_permissions.length}</p>
-                    </div>
-                </div>
-                <hr>
-                ${permissionsHtml}
-            `;
-            
-            const modal = new bootstrap.Modal(document.getElementById('appDetailModal'));
-            modal.show();
         }
 
+        // 页面加载完成后执行
         document.addEventListener('DOMContentLoaded', function() {
+            console.log('页面加载完成，开始加载数据...');
             loadSummary();
             loadRiskDistribution();
             loadApps();
             loadPermissions();
             loadPermissionRisks();
+            console.log('数据加载完成');
         });
     </script>
 </body>
