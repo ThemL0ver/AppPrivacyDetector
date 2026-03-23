@@ -18,92 +18,223 @@ class HookManager:
     def connect_device(self) -> bool:
         """连接到设备"""
         print("[HookManager] 正在连接设备...")
+        
+        # 尝试使用 frida.get_usb_device() 连接，这是 frida 命令行工具使用的方式
         try:
-            # 尝试连接夜神模拟器 (新端口)
-            self.device = frida.get_device_manager().add_remote_device("127.0.0.1:62026")
-            print("[HookManager] 成功连接到设备")
+            print("[HookManager] 尝试使用 frida.get_usb_device()")
+            self.device = frida.get_usb_device(timeout=15)
+            print(f"[HookManager] 成功连接到设备: {self.device.name}")
             return True
         except Exception as e:
-            print(f"[HookManager] 连接设备失败: {e}")
-            # 尝试使用默认设备
-            try:
-                self.device = frida.get_usb_device(timeout=5)
-                print("[HookManager] 成功连接到USB设备")
+            print(f"[HookManager] frida.get_usb_device() 连接失败: {e}")
+        
+        # 尝试使用 frida.get_device() 作为备用
+        try:
+            print("[HookManager] 尝试使用 frida.get_device()")
+            self.device = frida.get_device(timeout=15)
+            print(f"[HookManager] 成功连接到设备: {self.device.name}")
+            return True
+        except Exception as e:
+            print(f"[HookManager] frida.get_device() 连接失败: {e}")
+        
+        # 尝试使用设备管理器枚举设备并连接
+        try:
+            print("[HookManager] 尝试枚举所有设备")
+            manager = frida.get_device_manager()
+            devices = manager.enumerate_devices()
+            print(f"[HookManager] 发现设备: {[d.name for d in devices]}")
+            if devices:
+                self.device = devices[0]
+                print(f"[HookManager] 成功连接到设备: {self.device.name}")
                 return True
-            except Exception as e2:
-                print(f"[HookManager] 连接USB设备失败: {e2}")
-                return False
+        except Exception as e:
+            print(f"[HookManager] 枚举设备失败: {e}")
+        
+        print("[HookManager] 所有连接方式均失败")
+        return False
     
-    def start(self, spawn: bool = False) -> bool:
+    def start(self, spawn: bool = False) -> tuple[bool, int]:
         """启动Frida会话"""
         print(f"[HookManager] 启动Frida会话，注入 {self.package_name}...")
         
-        # 尝试多次附加
-        max_retries = 3
-        for retry in range(max_retries):
-            try:
-                if spawn:
-                    # 以spawn方式启动应用
-                    print(f"[HookManager] 尝试以spawn方式启动应用 (尝试 {retry+1}/{max_retries})...")
-                    pid = self.device.spawn([self.package_name])
-                    self.session = self.device.attach(pid)
-                    self.device.resume(pid)
-                    print(f"[HookManager] 以spawn方式启动应用，PID: {pid}")
-                else:
-                    # 附加到已运行的应用
-                    print(f"[HookManager] 尝试附加到已运行的应用 (尝试 {retry+1}/{max_retries})...")
-                    self.session = self.device.attach(self.package_name)
-                    print("[HookManager] 成功附加到应用")
-                
-                self.is_running = True
-                return True
-            except Exception as e:
-                print(f"[HookManager] 附加失败: {e}")
-                # 增加延迟后重试
-                time.sleep(2)
-                continue
-        
-        # 尝试使用PID附加
+        # 先尝试启动应用（如果没有运行）
         try:
-            print("[HookManager] 尝试通过PID附加...")
-            # 获取应用的PID - 修复命令执行问题
             import subprocess
-            # 使用正确的方式执行带管道的命令
+            # 检查应用是否在运行
             result = subprocess.run(["adb", "shell", "ps"], capture_output=True, text=True)
+            app_running = False
+            pids = []
             if result.stdout:
-                lines = result.stdout.strip().split('\n')
-                for line in lines:
+                for line in result.stdout.strip().split('\n'):
                     if self.package_name in line:
+                        app_running = True
                         parts = line.split()
                         if len(parts) >= 2:
                             try:
                                 pid = int(parts[1])
-                                print(f"[HookManager] 找到应用PID: {pid}")
-                                self.session = self.device.attach(pid)
-                                print("[HookManager] 成功通过PID附加到应用")
-                                self.is_running = True
-                                return True
-                            except (ValueError, Exception) as e:
-                                print(f"[HookManager] 解析PID或附加失败: {e}")
-                                continue
+                                pids.append(pid)
+                            except ValueError:
+                                pass
+            
+            if not app_running:
+                print(f"[HookManager] 应用 {self.package_name} 未运行，尝试启动...")
+                # 启动应用
+                start_result = subprocess.run(["adb", "shell", "am", "start", "-n", f"{self.package_name}/.MainActivity"], capture_output=True, text=True)
+                print(f"[HookManager] 启动应用结果: {start_result.returncode}")
+                # 等待应用完全启动
+                time.sleep(5)
+                # 再次检查应用是否运行
+                result = subprocess.run(["adb", "shell", "ps"], capture_output=True, text=True)
+                if result.stdout:
+                    for line in result.stdout.strip().split('\n'):
+                        if self.package_name in line:
+                            parts = line.split()
+                            if len(parts) >= 2:
+                                try:
+                                    pid = int(parts[1])
+                                    pids.append(pid)
+                                except ValueError:
+                                    pass
+            else:
+                # 应用已运行，等待一下确保Java运行时已加载
+                time.sleep(2)
+            
+            print(f"[HookManager] 找到应用进程: {pids}")
         except Exception as e:
-            print(f"[HookManager] 通过PID附加失败: {e}")
+            print(f"[HookManager] 检查应用状态失败: {e}")
         
-        return False
+        # 尝试多种附加策略
+        strategies = [
+            ("使用包名附加", lambda: self.device.attach(self.package_name)),
+        ]
+        
+        # 添加PID附加策略
+        if 'pids' in locals() and pids:
+            for pid in pids:
+                strategies.append((f"通过PID {pid} 附加", lambda pid=pid: self.device.attach(pid)))
+        
+        # 添加spawn策略
+        if spawn:
+            strategies.append(("以spawn方式启动", lambda: (self.device.spawn([self.package_name]), True)))
+        
+        # 尝试所有策略
+        for strategy_name, attach_func in strategies:
+            print(f"[HookManager] 尝试策略: {strategy_name}")
+            try:
+                result = attach_func()
+                if isinstance(result, tuple) and len(result) == 2 and result[1]:
+                    # spawn方式
+                    pid = result[0]
+                    self.session = self.device.attach(pid)
+                    print(f"[HookManager] 以spawn方式启动应用，PID: {pid}")
+                    self.is_running = True
+                    return True, pid
+                else:
+                    # 普通附加
+                    self.session = result
+                    print(f"[HookManager] 成功通过 {strategy_name} 附加到应用")
+                    self.is_running = True
+                    return True, None
+            except Exception as e:
+                print(f"[HookManager] {strategy_name} 失败: {e}")
+                continue
+        
+        # 尝试多次重试
+        max_retries = 3
+        for retry in range(max_retries):
+            print(f"[HookManager] 重试附加 (尝试 {retry+1}/{max_retries})...")
+            try:
+                # 再次检查应用进程
+                import subprocess
+                result = subprocess.run(["adb", "shell", "ps"], capture_output=True, text=True)
+                current_pids = []
+                if result.stdout:
+                    for line in result.stdout.strip().split('\n'):
+                        if self.package_name in line:
+                            parts = line.split()
+                            if len(parts) >= 2:
+                                try:
+                                    pid = int(parts[1])
+                                    current_pids.append(pid)
+                                except ValueError:
+                                    pass
+                
+                print(f"[HookManager] 当前应用进程: {current_pids}")
+                
+                # 尝试附加到第一个进程
+                for pid in current_pids:
+                    try:
+                        print(f"[HookManager] 尝试附加到 PID: {pid}")
+                        self.session = self.device.attach(pid)
+                        print(f"[HookManager] 成功通过PID {pid} 附加到应用")
+                        self.is_running = True
+                        return True, None
+                    except Exception as e:
+                        print(f"[HookManager] 附加到PID {pid} 失败: {e}")
+                        continue
+            except Exception as e:
+                print(f"[HookManager] 重试过程中出错: {e}")
+            
+            time.sleep(3)
+        
+        print("[HookManager] 所有附加策略均失败")
+        return False, None
     
-    def load_script(self, js_path: str) -> bool:
+    def load_script(self, js_path: str, pid: int = None) -> bool:
         """加载Hook脚本"""
         try:
             with open(js_path, 'r', encoding='utf-8') as f:
                 js_code = f.read()
             
+            # 确保脚本在 Java.perform 中执行，并添加错误处理
+            if 'Java.perform' not in js_code:
+                js_code = '''
+                try {
+                    Java.perform(function() {
+                        ''' + js_code + '''
+                    });
+                } catch (e) {
+                    console.log('[Hook] 错误: ' + e);
+                    send({error: '' + e});
+                }
+                '''
+            else:
+                # 如果已经有 Java.perform，添加错误处理
+                js_code = '''
+                try {
+                    ''' + js_code + '''
+                } catch (e) {
+                    console.log('[Hook] 错误: ' + e);
+                    send({error: '' + e});
+                }
+                '''
+            
             self.script = self.session.create_script(js_code)
             self.script.on('message', self._on_message)
-            self.script.load()
-            print(f"[HookManager] 成功加载脚本: {js_path}")
-            return True
+            
+            # 尝试多次加载脚本
+            max_retries = 3
+            for retry in range(max_retries):
+                try:
+                    self.script.load()
+                    print(f"[HookManager] 成功加载脚本: {js_path}")
+                    
+                    # 如果是spawn模式，加载脚本后恢复进程
+                    if pid is not None:
+                        print(f"[HookManager] 恢复进程，PID: {pid}")
+                        self.device.resume(pid)
+                    
+                    return True
+                except Exception as e:
+                    print(f"[HookManager] 加载脚本失败 (尝试 {retry+1}/{max_retries}): {e}")
+                    time.sleep(2)
+                    continue
+            
+            return False
         except Exception as e:
             print(f"[HookManager] 加载脚本失败: {e}")
+            import traceback
+            traceback.print_exc()
             return False
     
     def _on_message(self, message, data):

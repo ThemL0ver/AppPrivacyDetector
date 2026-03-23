@@ -1,581 +1,705 @@
-<!--可视化预警系统-->
+<!--可视化预警系统: 警民双视角版-->
 <!DOCTYPE html>
 <html lang="zh-CN">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>APP隐私权限检测与风险预警系统</title>
-    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/css/bootstrap.min.css" rel="stylesheet">
-    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <!-- 国内极速CDN -->
+    <link href="https://cdn.staticfile.net/twitter-bootstrap/5.1.3/css/bootstrap.min.css" rel="stylesheet">
+    <script src="https://cdn.staticfile.net/Chart.js/3.9.1/chart.min.js"></script>
     <style>
+        body { background-color: #f8f9fa; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; }
         .risk-high { background-color: #ffebee; }
         .risk-medium { background-color: #fff3e0; }
         .risk-low { background-color: #e8f5e9; }
-        .card { margin-bottom: 20px; }
-        .permission-tag { margin: 2px; }
+        .card { margin-bottom: 20px; border: none; box-shadow: 0 4px 6px rgba(0,0,0,0.05); border-radius: 8px; }
+        
+        /* 加载遮罩层 */
+        #loading-overlay {
+            position: fixed; top: 0; left: 0; width: 100%; height: 100%;
+            background: rgba(255,255,255,0.9); z-index: 9999;
+            display: flex; justify-content: center; align-items: center; flex-direction: column;
+        }
+
+        /* 视角切换器 */
+        .mode-switcher { background: rgba(255,255,255,0.1); border-radius: 20px; padding: 4px; display: inline-flex; }
+        .mode-btn { border: none; background: none; color: #fff; padding: 6px 16px; border-radius: 16px; transition: 0.3s; opacity: 0.7; }
+        .mode-btn.active { background: #fff; color: #212529; opacity: 1; font-weight: bold; }
+
+        /* 公众视角 - 健康卡片 */
+        .health-card { transition: transform 0.2s; cursor: pointer; }
+        .health-card:hover { transform: translateY(-5px); box-shadow: 0 8px 15px rgba(0,0,0,0.1); }
+        .health-score { font-size: 3.5rem; font-weight: 800; line-height: 1; }
+        .health-circle { width: 120px; height: 120px; border-radius: 50%; display: flex; align-items: center; justify-content: center; margin: 0 auto; border: 8px solid; }
+        .circle-danger { border-color: #dc3545; color: #dc3545; }
+        .circle-warning { border-color: #ffc107; color: #ffc107; }
+        .circle-success { border-color: #198754; color: #198754; }
+
     </style>
 </head>
 <body>
-    <nav class="navbar navbar-dark bg-dark">
+    <!-- 加载动画 -->
+    <div id="loading-overlay">
+        <div class="spinner-border text-primary" style="width: 3rem; height: 3rem;" role="status"></div>
+        <h5 class="mt-3 text-primary">正在分析平台数据...</h5>
+    </div>
+
+    <!-- 顶部导航栏 -->
+    <nav class="navbar navbar-dark bg-dark sticky-top shadow">
         <div class="container">
-            <a class="navbar-brand" href="/">APP隐私权限检测与风险预警系统</a>
+            <a class="navbar-brand d-flex align-items-center" href="/">
+                <span class="fs-4 me-2">🛡️</span> 隐私安全预警治理体系
+            </a>
+            
+            <!-- 警民视角切换 -->
+            <div class="mode-switcher mx-auto">
+                <button class="mode-btn active" id="btn-public" onclick="switchMode('public')">👥 公众视角 (隐私健康)</button>
+                <button class="mode-btn" id="btn-police" onclick="switchMode('police')">🚨 公安实战 (研判看板)</button>
+            </div>
+
+            <button class="btn btn-sm btn-outline-light" onclick="reloadData()">🔄 刷新数据</button>
         </div>
     </nav>
 
     <div class="container mt-4">
-        <div class="row">
-            <div class="col-md-12">
-                <div class="card">
-                    <div class="card-header">
-                        <h5>分析概览</h5>
-                    </div>
-                    <div class="card-body">
-                        <div class="row text-center">
-                            <div class="col-md-3">
-                                <h3 id="total-analyzed">0</h3>
-                                <p class="text-muted">总分析数量</p>
-                            </div>
-                            <div class="col-md-3">
-                                <h3 id="high-risk" class="text-danger">0</h3>
-                                <p class="text-muted">高风险应用</p>
-                            </div>
-                            <div class="col-md-3">
-                                <h3 id="medium-risk" class="text-warning">0</h3>
-                                <p class="text-muted">中风险应用</p>
-                            </div>
-                            <div class="col-md-3">
-                                <h3 id="low-risk" class="text-success">0</h3>
-                                <p class="text-muted">低风险应用</p>
+
+        <!-- ============================================== -->
+        <!-- 视角1：公众视角 (Public View) - 隐私健康可视化 -->
+        <!-- ============================================== -->
+        <div id="view-public">
+            <div class="p-4 mb-4 bg-white rounded-3 shadow-sm border-start border-5 border-primary">
+                <div class="container-fluid py-2">
+                    <h2 class="display-6 fw-bold">个人信息安全治理</h2>
+                    <p class="col-md-8 fs-5 text-muted">我们为您的手机应用进行深度体检。分数越低，代表该应用过度索取权限或存在后台违规调用的风险越高。</p>
+                </div>
+            </div>
+            
+            <h4 class="mb-3 text-secondary">📱 我的应用健康档案</h4>
+            <div class="row" id="public-app-grid">
+                <!-- 健康卡片将通过JS动态渲染到这里 -->
+            </div>
+        </div>
+
+        <!-- ============================================== -->
+        <!-- 视角2：公安实战视角 (Police View) - 研判看板 -->
+        <!-- ============================================== -->
+        <div id="view-police" style="display: none;">
+            
+            <!-- 实战概览 -->
+            <div class="row">
+                <div class="col-md-12">
+                    <div class="card border-0 bg-dark text-white">
+                        <div class="card-body py-4">
+                            <h5 class="card-title mb-4 border-bottom border-secondary pb-2">📊 全网态势与高危目标研判</h5>
+                            <div class="row text-center">
+                                <div class="col-md-3">
+                                    <h2 id="total-analyzed" class="fw-bold">0</h2>
+                                    <p class="text-light mb-0">纳入监控样本</p>
+                                </div>
+                                <div class="col-md-3 border-start border-secondary">
+                                    <h2 id="high-risk" class="text-danger fw-bold">0</h2>
+                                    <p class="text-light mb-0">涉嫌高危违规APP</p>
+                                </div>
+                                <div class="col-md-3 border-start border-secondary">
+                                    <h2 id="medium-risk" class="text-warning fw-bold">0</h2>
+                                    <p class="text-light mb-0">中度越界风险APP</p>
+                                </div>
+                                <div class="col-md-3 border-start border-secondary">
+                                    <h2 id="low-risk" class="text-success fw-bold">0</h2>
+                                    <p class="text-light mb-0">合规应用</p>
+                                </div>
                             </div>
                         </div>
                     </div>
                 </div>
             </div>
-        </div>
 
-        <div class="row">
-            <div class="col-md-6">
-                <div class="card">
-                    <div class="card-header">
-                        <h5>风险分布</h5>
+            <!-- 数据大盘 -->
+            <div class="row">
+                <div class="col-md-6">
+                    <div class="card h-100">
+                        <div class="card-header bg-white fw-bold text-primary">样本风险定级分布</div>
+                        <div class="card-body d-flex justify-content-center"><canvas id="riskChart"></canvas></div>
                     </div>
-                    <div class="card-body">
-                        <canvas id="riskChart"></canvas>
+                </div>
+                <div class="col-md-6">
+                    <div class="card h-100">
+                        <div class="card-header bg-white fw-bold text-primary">敏感API调用图谱 (Top 20)</div>
+                        <div class="card-body"><canvas id="permissionChart"></canvas></div>
                     </div>
                 </div>
             </div>
-            <div class="col-md-6">
-                <div class="card">
-                    <div class="card-header">
-                        <h5>高频权限统计</h5>
-                    </div>
-                    <div class="card-body">
-                        <canvas id="permissionChart"></canvas>
-                    </div>
-                </div>
-            </div>
-        </div>
 
-        <div class="row mt-4">
-            <div class="col-md-6">
-                <div class="card">
-                    <div class="card-header">
-                        <h5>权限风险分布</h5>
-                    </div>
-                    <div class="card-body">
-                        <canvas id="permissionRiskChart"></canvas>
+            <div class="row mt-2">
+                <div class="col-md-6">
+                    <div class="card h-100">
+                        <div class="card-header bg-white fw-bold text-primary">权限滥用风险分级</div>
+                        <div class="card-body d-flex justify-content-center align-items-center"><canvas id="permissionRiskChart"></canvas></div>
                     </div>
                 </div>
-            </div>
-            <div class="col-md-6">
-                <div class="card">
-                    <div class="card-header">
-                        <h5>高风险权限列表</h5>
-                    </div>
-                    <div class="card-body">
-                        <div class="table-responsive">
-                            <table class="table table-hover">
-                                <thead>
-                                    <tr>
-                                        <th>权限名称</th>
-                                        <th>风险等级</th>
-                                    </tr>
+                <div class="col-md-6">
+                    <div class="card h-100">
+                        <div class="card-header bg-white fw-bold text-danger">⚠️ 极高危权限检出清单</div>
+                        <div class="card-body p-0" style="max-height: 350px; overflow-y: auto;">
+                            <table class="table table-hover mb-0">
+                                <thead class="table-light sticky-top">
+                                    <tr><th>涉权标识</th><th>定性级别</th></tr>
                                 </thead>
-                                <tbody id="high-risk-permissions">
-                                </tbody>
+                                <tbody id="high-risk-permissions"></tbody>
                             </table>
                         </div>
                     </div>
                 </div>
             </div>
-        </div>
 
-        <div class="row mt-4">
-            <div class="col-md-12">
-                <div class="card">
-                    <div class="card-header">
-                        <h5>应用列表</h5>
-                    </div>
-                    <div class="card-body">
-                        <div class="table-responsive">
-                            <table class="table table-hover">
-                                <thead>
-                                    <tr>
-                                        <th>APK文件</th>
-                                        <th>包名</th>
-                                        <th>风险等级</th>
-                                        <th>风险评分</th>
-                                        <th>权限总数</th>
-                                        <th>危险权限数</th>
-                                        <th>高风险权限数</th>
-                                        <th>操作</th>
-                                    </tr>
-                                </thead>
-                                <tbody id="app-table">
-                                </tbody>
-                            </table>
+            <!-- 实战目标列表 -->
+            <div class="row mt-2">
+                <div class="col-md-12">
+                    <div class="card border-danger">
+                        <div class="card-header bg-danger text-white fw-bold">🎯 嫌疑应用侦测清单</div>
+                        <div class="card-body p-0">
+                            <div class="table-responsive">
+                                <table class="table table-hover align-middle mb-0">
+                                    <thead class="table-light">
+                                        <tr>
+                                            <th>检材标识(APK)</th>
+                                            <th>应用包名</th>
+                                            <th>研判定级</th>
+                                            <th>量化评分</th>
+                                            <th>索权总数</th>
+                                            <th>危险/极高危项</th>
+                                            <th>侦查操作</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody id="app-table">
+                                        <tr><td colspan="7" class="text-center text-muted py-4">正在加载嫌疑目标...</td></tr>
+                                    </tbody>
+                                </table>
+                            </div>
                         </div>
                     </div>
                 </div>
             </div>
-        </div>
+
+        </div> <!-- End Police View -->
+
     </div>
 
+    <!-- 模态框: 案件与应用详情 (仅实战模式提供报告导出) -->
     <div class="modal fade" id="appDetailModal" tabindex="-1">
-        <div class="modal-dialog modal-lg">
-            <div class="modal-content">
-                <div class="modal-header">
-                    <h5 class="modal-title">应用详情</h5>
-                    <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+        <div class="modal-dialog modal-xl">
+            <div class="modal-content border-0 shadow-lg">
+                <div class="modal-header bg-dark text-white border-0">
+                    <h5 class="modal-title">🕵️ 目标深度检测溯源档案</h5>
+                    <div>
+                        <button type="button" class="btn btn-sm btn-primary me-2" id="btn-export-report" onclick="exportEvidenceReport()">📄 导出标准化电子取证报告</button>
+                        <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+                    </div>
                 </div>
-                <div class="modal-body" id="app-detail-content">
+                <div class="modal-body bg-light" id="app-detail-content">
+                    加载中...
                 </div>
             </div>
         </div>
     </div>
 
-    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/js/bootstrap.bundle.min.js"></script>
+    <!-- 国内CDN脚本加载 -->
+    <script src="https://cdn.staticfile.net/twitter-bootstrap/5.1.3/js/bootstrap.bundle.min.js"></script>
     <script>
-        // 确保Chart.js加载完成
-        if (typeof Chart === 'undefined') {
-            console.error('Chart.js 未加载');
-        }
-        
         let riskChart, permissionChart, permissionRiskChart;
+        let globalAppsData = [];     // 缓存所有应用数据供报告导出使用
+        let currentTargetPkg = '';   // 当前选中的包名
 
-        async function loadSummary() {
-            try {
-                const response = await fetch('/api/summary');
-                if (!response.ok) {
-                    throw new Error(`HTTP error! status: ${response.status}`);
-                }
-                const data = await response.json();
-                
-                document.getElementById('total-analyzed').textContent = data.total_analyzed || 0;
-                document.getElementById('high-risk').textContent = data.high_risk || 0;
-                document.getElementById('medium-risk').textContent = data.medium_risk || 0;
-                document.getElementById('low-risk').textContent = data.low_risk || 0;
-            } catch (error) {
-                console.error('加载摘要数据失败:', error);
-            }
-        }
-        
-        async function loadRiskDistribution() {
-            try {
-                const response = await fetch('/api/permission-risks');
-                if (!response.ok) {
-                    throw new Error(`HTTP error! status: ${response.status}`);
-                }
-                const data = await response.json();
-                
-                // 确保数据结构正确
-                const riskStats = data.risk_stats || { high: 0, medium: 0, low: 0, very_high: 0 };
-                
-                // 转换权限风险数据为应用风险分布格式
-                const riskData = {
-                    high_risk: (riskStats.high || 0) + (riskStats.very_high || 0),
-                    medium_risk: riskStats.medium || 0,
-                    low_risk: riskStats.low || 0
-                };
-                
-                updateRiskChart(riskData);
-            } catch (error) {
-                console.error('加载风险分布数据失败:', error);
-                // 使用默认数据
-                updateRiskChart({ high_risk: 0, medium_risk: 0, low_risk: 0 });
+        // 视角切换逻辑
+        function switchMode(mode) {
+            const btnPublic = document.getElementById('btn-public');
+            const btnPolice = document.getElementById('btn-police');
+            const viewPublic = document.getElementById('view-public');
+            const viewPolice = document.getElementById('view-police');
+
+            if(mode === 'public') {
+                btnPublic.classList.add('active');
+                btnPolice.classList.remove('active');
+                viewPublic.style.display = 'block';
+                viewPolice.style.display = 'none';
+            } else {
+                btnPolice.classList.add('active');
+                btnPublic.classList.remove('active');
+                viewPolice.style.display = 'block';
+                viewPublic.style.display = 'none';
             }
         }
 
-        async function loadApps() {
-            try {
-                const response = await fetch('/api/apps');
-                if (!response.ok) {
-                    throw new Error(`HTTP error! status: ${response.status}`);
-                }
-                const apps = await response.json() || [];
-                
-                const tbody = document.getElementById('app-table');
-                tbody.innerHTML = '';
-                
-                apps.forEach(app => {
-                    const row = document.createElement('tr');
-                    row.className = `risk-${app.risk_level || 'low'}`;
-                    row.innerHTML = `
-                        <td>${app.apk_file || '未知'}</td>
-                        <td>${app.package_name || '未知'}</td>
-                        <td><span class="badge bg-${getRiskBadgeClass(app.risk_level || 'low')}">${app.risk_level || '低'}</span></td>
-                        <td>${app.risk_score || 0}</td>
-                        <td>${app.permissions_count || 0}</td>
-                        <td>${app.dangerous_permissions || 0}</td>
-                        <td>${app.high_risk_permissions || 0}</td>
-                        <td>
-                            <button class="btn btn-sm btn-info" onclick="showAppDetail('${app.package_name || 'unknown'}')">详情</button>
-                        </td>
-                    `;
-                    tbody.appendChild(row);
-                });
-            } catch (error) {
-                console.error('加载应用列表失败:', error);
-                const tbody = document.getElementById('app-table');
-                tbody.innerHTML = '<tr><td colspan="8" class="text-center">加载应用列表失败</td></tr>';
-            }
-        }
-
-        async function loadPermissions() {
-            try {
-                const response = await fetch('/api/permissions');
-                if (!response.ok) {
-                    throw new Error(`HTTP error! status: ${response.status}`);
-                }
-                const permissions = await response.json() || [];
-                
-                updatePermissionChart(permissions);
-            } catch (error) {
-                console.error('加载权限统计失败:', error);
-                updatePermissionChart([]);
-            }
-        }
-
-        async function loadPermissionRisks() {
-            try {
-                const response = await fetch('/api/permission-risks');
-                if (!response.ok) {
-                    throw new Error(`HTTP error! status: ${response.status}`);
-                }
-                const data = await response.json() || {};
-                
-                updatePermissionRiskChart(data.risk_stats || {});
-                updateHighRiskPermissions(data.permission_details || []);
-            } catch (error) {
-                console.error('加载权限风险数据失败:', error);
-                updatePermissionRiskChart({});
-                updateHighRiskPermissions([]);
-            }
-        }
-
-        function updateRiskChart(data) {
-            try {
-                const ctx = document.getElementById('riskChart');
-                if (!ctx) {
-                    console.error('riskChart canvas not found');
-                    return;
-                }
-                
-                const canvasContext = ctx.getContext('2d');
-                if (!canvasContext) {
-                    console.error('Cannot get canvas context');
-                    return;
-                }
-                
-                if (riskChart) {
-                    riskChart.destroy();
-                }
-                
-                // 确保数据不为空
-                const highRisk = data.high_risk || 0;
-                const mediumRisk = data.medium_risk || 0;
-                const lowRisk = data.low_risk || 0;
-                
-                // 准备数据和标签
-                const labels = [];
-                const values = [];
-                const colors = [];
-                
-                if (highRisk > 0) {
-                    labels.push('高风险');
-                    values.push(highRisk);
-                    colors.push('#dc3545');
-                }
-                
-                if (mediumRisk > 0) {
-                    labels.push('中风险');
-                    values.push(mediumRisk);
-                    colors.push('#ffc107');
-                }
-                
-                if (lowRisk > 0) {
-                    labels.push('低风险');
-                    values.push(lowRisk);
-                    colors.push('#198754');
-                }
-                
-                // 如果所有值都为0，添加默认数据
-                if (values.length === 0) {
-                    labels.push('无数据');
-                    values.push(1);
-                    colors.push('#6c757d');
-                }
-                
-                riskChart = new Chart(canvasContext, {
-                    type: 'pie',
-                    data: {
-                        labels: labels,
-                        datasets: [{
-                            data: values,
-                            backgroundColor: colors
-                        }]
-                    },
-                    options: {
-                        responsive: true,
-                        plugins: {
-                            legend: {
-                                position: 'bottom'
-                            }
-                        }
-                    }
-                });
-            } catch (error) {
-                console.error('更新风险图表失败:', error);
-            }
-        }
-
-        function updatePermissionChart(permissions) {
-            try {
-                const ctx = document.getElementById('permissionChart');
-                if (!ctx) {
-                    console.error('permissionChart canvas not found');
-                    return;
-                }
-                
-                const canvasContext = ctx.getContext('2d');
-                if (!canvasContext) {
-                    console.error('Cannot get canvas context');
-                    return;
-                }
-                
-                if (permissionChart) {
-                    permissionChart.destroy();
-                }
-                
-                let labels = [];
-                let data = [];
-                
-                if (permissions && permissions.length > 0) {
-                    labels = permissions.map(p => p[0] ? p[0].split('.').pop() : '未知');
-                    data = permissions.map(p => p[1] || 0);
-                } else {
-                    labels = ['无数据'];
-                    data = [0];
-                }
-                
-                permissionChart = new Chart(canvasContext, {
-                    type: 'bar',
-                    data: {
-                        labels: labels,
-                        datasets: [{
-                            label: '使用次数',
-                            data: data,
-                            backgroundColor: '#0d6efd'
-                        }]
-                    },
-                    options: {
-                        responsive: true,
-                        indexAxis: 'y',
-                        plugins: {
-                            legend: {
-                                display: false
-                            }
-                        }
-                    }
-                });
-            } catch (error) {
-                console.error('更新权限图表失败:', error);
-            }
-        }
-
-        function updatePermissionRiskChart(riskStats) {
-            try {
-                const ctx = document.getElementById('permissionRiskChart');
-                if (!ctx) {
-                    console.error('permissionRiskChart canvas not found');
-                    return;
-                }
-                
-                const canvasContext = ctx.getContext('2d');
-                if (!canvasContext) {
-                    console.error('Cannot get canvas context');
-                    return;
-                }
-                
-                if (permissionRiskChart) {
-                    permissionRiskChart.destroy();
-                }
-                
-                // 确保riskStats对象存在且有必要的属性
-                const safeRiskStats = {
-                    low: riskStats.low || 0,
-                    medium: riskStats.medium || 0,
-                    high: riskStats.high || 0,
-                    very_high: riskStats.very_high || 0
-                };
-                
-                permissionRiskChart = new Chart(canvasContext, {
-                    type: 'bar',
-                    data: {
-                        labels: ['低风险', '中风险', '中高风险', '高风险'],
-                        datasets: [{
-                            label: '权限数量',
-                            data: [safeRiskStats.low, safeRiskStats.medium, safeRiskStats.high, safeRiskStats.very_high],
-                            backgroundColor: ['#198754', '#0d6efd', '#ffc107', '#dc3545']
-                        }]
-                    },
-                    options: {
-                        responsive: true,
-                        plugins: {
-                            legend: {
-                                display: false
-                            }
-                        }
-                    }
-                });
-            } catch (error) {
-                console.error('更新权限风险图表失败:', error);
-            }
-        }
-
-        function updateHighRiskPermissions(permissions) {
-            try {
-                const tbody = document.getElementById('high-risk-permissions');
-                if (!tbody) {
-                    console.error('high-risk-permissions table body not found');
-                    return;
-                }
-                
-                tbody.innerHTML = '';
-                
-                if (!permissions || permissions.length === 0) {
-                    tbody.innerHTML = '<tr><td colspan="2" class="text-center">无高风险权限数据</td></tr>';
-                    return;
-                }
-                
-                // 过滤出中高、高、极高风险的权限
-                const highRiskPerms = permissions.filter(p => 
-                    p && (p.main_risk_level === '中高' || 
-                    p.main_risk_level === '高' || 
-                    p.main_risk_level === '极高')
-                );
-                
-                if (highRiskPerms.length === 0) {
-                    tbody.innerHTML = '<tr><td colspan="2" class="text-center">无高风险权限</td></tr>';
-                    return;
-                }
-                
-                highRiskPerms.forEach(perm => {
-                    if (perm && perm.name) {
-                        const row = document.createElement('tr');
-                        const badgeClass = getRiskBadgeClass(perm.main_risk_level || 'low');
-                        row.innerHTML = `
-                            <td>${perm.name.split('.').pop()}</td>
-                            <td><span class="badge bg-${badgeClass}">${perm.risk_level || '未知'}</span></td>
-                        `;
-                        tbody.appendChild(row);
-                    }
-                });
-            } catch (error) {
-                console.error('更新高风险权限列表失败:', error);
-            }
+        // 工具函数
+        function translateRisk(risk) {
+            const map = { 'high': '高危', 'medium': '中危', 'low': '低危' };
+            return map[risk] || risk;
         }
 
         function getRiskBadgeClass(riskLevel) {
             switch(riskLevel) {
-                case '低': return 'success';
-                case '中': return 'primary';
-                case '中高': return 'warning';
-                case '高': return 'danger';
-                case '极高': return 'danger';
-                case 'high': return 'danger';
-                case 'medium': return 'warning';
-                case 'low': return 'success';
+                case '低': case 'low': return 'success';
+                case '中': case 'medium': return 'warning text-dark';
+                case '中高': return 'warning text-dark';
+                case '高': case '极高': case 'high': return 'danger';
                 default: return 'secondary';
             }
         }
 
-        async function showAppDetail(packageName) {
+        // 重新加载数据缓存
+        async function reloadData() {
             try {
-                const response = await fetch(`/api/app/${packageName}`);
-                if (!response.ok) {
-                    throw new Error(`HTTP error! status: ${response.status}`);
-                }
-                const app = await response.json();
+                document.getElementById('loading-overlay').style.display = 'flex';
+                await fetch('/api/reload');
+                location.reload();
+            } catch(e) {
+                console.error("重新加载失败");
+                document.getElementById('loading-overlay').style.display = 'none';
+            }
+        }
+
+        // 数据加载系列函数
+        async function loadSummary() {
+            const response = await fetch('/api/summary');
+            const data = await response.json();
+            if(!data.error) {
+                document.getElementById('total-analyzed').textContent = data.total_analyzed || 0;
+                document.getElementById('high-risk').textContent = data.high_risk || 0;
+                document.getElementById('medium-risk').textContent = data.medium_risk || 0;
+                document.getElementById('low-risk').textContent = data.low_risk || 0;
+            }
+        }
+        
+        async function loadPermissionRiskData() {
+            const response = await fetch('/api/permission-risks');
+            const data = await response.json();
+            
+            const riskStats = data.risk_stats || { high: 0, medium: 0, low: 0, very_high: 0 };
+            const riskData = {
+                high_risk: (riskStats.high || 0) + (riskStats.very_high || 0),
+                medium_risk: riskStats.medium || 0,
+                low_risk: riskStats.low || 0
+            };
+            updateRiskChart(riskData);
+            updatePermissionRiskChart(riskStats);
+            updateHighRiskPermissions(data.permission_details || []);
+        }
+
+        async function loadApps() {
+            const response = await fetch('/api/apps');
+            const apps = await response.json();
+            globalAppsData = apps; // 保存到全局
+            
+            // 1. 渲染公众视角卡片
+            renderPublicCards(apps);
+
+            // 2. 渲染公安视角表格
+            const tbody = document.getElementById('app-table');
+            tbody.innerHTML = '';
+            if(apps.error || apps.length === 0) {
+                tbody.innerHTML = '<tr><td colspan="7" class="text-center text-danger">未找到目标数据</td></tr>';
+                return;
+            }
+            
+            apps.forEach(app => {
+                const row = document.createElement('tr');
+                const cnRisk = translateRisk(app.risk_level);
+                row.innerHTML = `
+                    <td><strong>${app.apk_file || '未知'}</strong></td>
+                    <td><span class="text-muted font-monospace" style="font-size: 0.85em">${app.package_name || '未知'}</span></td>
+                    <td><span class="badge bg-${getRiskBadgeClass(app.risk_level)} px-3 py-2">${cnRisk}</span></td>
+                    <td><strong class="${app.risk_score > 50 ? 'text-danger' : 'text-success'}">${app.risk_score || 0}</strong> 分</td>
+                    <td>${app.permissions_count || 0}</td>
+                    <td><span class="text-warning fw-bold">${app.dangerous_permissions || 0}</span> / <span class="text-danger fw-bold">${app.high_risk_permissions || 0}</span></td>
+                    <td>
+                        <button class="btn btn-sm btn-dark" onclick="showAppDetail('${app.package_name || ''}')">🔍 深度勘验</button>
+                    </td>
+                `;
+                tbody.appendChild(row);
+            });
+        }
+
+        // 渲染公众视角的健康卡片
+        function renderPublicCards(apps) {
+            const grid = document.getElementById('public-app-grid');
+            grid.innerHTML = '';
+            
+            if(apps.error || apps.length === 0) {
+                grid.innerHTML = '<div class="col-12"><p class="text-muted">暂无分析记录</p></div>';
+                return;
+            }
+
+            apps.forEach(app => {
+                // 计算健康分: 满分100，根据risk_score扣分。假设最恶劣达到100分。
+                let score = Math.max(0, 100 - (app.risk_score || 0));
+                let healthClass = 'circle-success';
+                let healthText = '健康合规';
+                let textClass = 'text-success';
                 
-                const content = document.getElementById('app-detail-content');
-                if (!content) {
-                    console.error('app-detail-content not found');
-                    return;
+                if (score < 60) {
+                    healthClass = 'circle-danger';
+                    healthText = '存在风险';
+                    textClass = 'text-danger';
+                } else if (score < 85) {
+                    healthClass = 'circle-warning';
+                    healthText = '建议关注';
+                    textClass = 'text-warning';
                 }
-                
-                // 构建权限详情HTML
-                let permissionsHtml = '';
-                if (app.static_analysis && app.static_analysis.permission_analysis && app.static_analysis.permission_analysis.permission_details) {
-                    permissionsHtml = '<h6>权限详情</h6><div class="row">';
-                    app.static_analysis.permission_analysis.permission_details.forEach(perm => {
-                        const badgeClass = getRiskBadgeClass(perm.main_risk_level);
-                        permissionsHtml += `
-                            <div class="col-md-4 mb-2">
-                                <span class="badge bg-${badgeClass}">${perm.risk_level}</span>
-                                <span class="ms-2">${perm.name.split('.').pop()}</span>
+
+                grid.innerHTML += `
+                    <div class="col-md-4 mb-4">
+                        <div class="card health-card h-100" onclick="showAppDetail('${app.package_name}')">
+                            <div class="card-body text-center py-4">
+                                <h5 class="card-title fw-bold text-dark mb-4">${app.apk_file.replace('.apk','')}</h5>
+                                <div class="health-circle ${healthClass} mb-3 shadow-sm">
+                                    <span class="health-score">${score}</span>
+                                </div>
+                                <h5 class="${textClass} fw-bold">${healthText}</h5>
+                                <p class="text-muted small mt-3 px-2">发现 <strong class="text-danger">${app.high_risk_permissions || 0}</strong> 项极高危权限<br>
+                                <span class="badge bg-light text-dark border mt-2">点击查看报告</span></p>
                             </div>
-                        `;
+                        </div>
+                    </div>
+                `;
+            });
+        }
+
+        async function loadPermissions() {
+            const response = await fetch('/api/permissions');
+            const permissions = await response.json();
+            updatePermissionChart(permissions || []);
+        }
+
+        /* ----- 图表渲染模块 ----- */
+        function updateRiskChart(data) {
+            const ctx = document.getElementById('riskChart');
+            if (riskChart) riskChart.destroy();
+            const values = [data.high_risk || 0, data.medium_risk || 0, data.low_risk || 0];
+            const labels = values.every(v=>v===0) ? ['无数据'] : ['高危', '中危', '合规'];
+            const graphData = values.every(v=>v===0) ? [1] : values;
+            const colors = values.every(v=>v===0) ? ['#e9ecef'] : ['#dc3545', '#ffc107', '#198754'];
+            riskChart = new Chart(ctx, {
+                type: 'doughnut', data: { labels: labels, datasets: [{ data: graphData, backgroundColor: colors }] },
+                options: { responsive: true, plugins: { legend: { position: 'right' } }, animation: {duration: 800} }
+            });
+        }
+
+        function updatePermissionChart(permissions) {
+            const ctx = document.getElementById('permissionChart');
+            if (permissionChart) permissionChart.destroy();
+            let labels = permissions.length ? permissions.map(p => (p[0]||'').split('.').pop()) : ['暂无数据'];
+            let data = permissions.length ? permissions.map(p => p[1]) : [0];
+            permissionChart = new Chart(ctx, {
+                type: 'bar',
+                data: { labels: labels, datasets: [{ label: '被检测应用调用数', data: data, backgroundColor: '#0d6efd', borderRadius: 4 }] },
+                options: { responsive: true, indexAxis: 'y', plugins: { legend: { display: false } }, animation: {duration: 800} }
+            });
+        }
+
+        function updatePermissionRiskChart(riskStats) {
+            const ctx = document.getElementById('permissionRiskChart');
+            if (permissionRiskChart) permissionRiskChart.destroy();
+            permissionRiskChart = new Chart(ctx, {
+                type: 'bar',
+                data: {
+                    labels: ['低危项', '中危项', '较高危项', '极高危项'],
+                    datasets: [{
+                        label: '违规索权统计',
+                        data: [riskStats.low||0, riskStats.medium||0, riskStats.high||0, riskStats.very_high||0],
+                        backgroundColor: ['#198754', '#0dcaf0', '#ffc107', '#dc3545'],
+                        borderRadius: 4
+                    }]
+                },
+                options: { responsive: true, plugins: { legend: { display: false } }, animation: {duration: 800} }
+            });
+        }
+
+        function updateHighRiskPermissions(permissions) {
+            const tbody = document.getElementById('high-risk-permissions');
+            tbody.innerHTML = '';
+            const highRiskPerms = permissions.filter(p => p && (p.main_risk_level === '中高' || p.main_risk_level === '高' || p.main_risk_level === '极高'));
+            if (highRiskPerms.length === 0) {
+                tbody.innerHTML = '<tr><td colspan="2" class="text-center text-muted">本网暂未发现极高危特征</td></tr>';
+                return;
+            }
+            highRiskPerms.forEach(perm => {
+                const row = document.createElement('tr');
+                row.innerHTML = `
+                    <td class="font-monospace text-truncate" style="max-width:200px; font-size: 0.85em;" title="${perm.name}">${(perm.name||'').split('.').pop()}</td>
+                    <td><span class="badge bg-${getRiskBadgeClass(perm.main_risk_level)} shadow-sm">${perm.risk_level.split('（')[0]}</span></td>
+                `;
+                tbody.appendChild(row);
+            });
+        }
+
+        /* ----- 详情与电子取证报告生成 ----- */
+        let detailCacheApp = null;
+        let detailCacheDyn = null;
+
+        async function showAppDetail(packageName) {
+            if(!packageName) return;
+            currentTargetPkg = packageName;
+            const content = document.getElementById('app-detail-content');
+            content.innerHTML = '<div class="text-center p-5"><div class="spinner-border text-primary"></div><p class="mt-3">正在调取勘验档案...</p></div>';
+            const modal = new bootstrap.Modal(document.getElementById('appDetailModal'));
+            modal.show();
+
+            try {
+                // 并发请求
+                const [appResp, dynResp] = await Promise.all([ fetch(`/api/app/${packageName}`), fetch(`/api/app/${packageName}/dynamic`) ]);
+                const app = await appResp.json();
+                const dynamicAnalysis = await dynResp.json();
+                
+                detailCacheApp = app;
+                detailCacheDyn = dynamicAnalysis;
+
+                // 组装静态权限气泡
+                let permissionsHtml = '<div class="text-muted">暂无清单</div>';
+                if (app.static_analysis?.permission_analysis?.permission_details) {
+                    permissionsHtml = '<div class="d-flex flex-wrap gap-2">';
+                    app.static_analysis.permission_analysis.permission_details.forEach(perm => {
+                        const bClass = getRiskBadgeClass(perm.main_risk_level);
+                        permissionsHtml += `<span class="badge border border-${bClass} text-${bClass} bg-white p-2 shadow-sm">${(perm.name||'').split('.').pop()} <br><small>(${perm.main_risk_level})</small></span>`;
                     });
                     permissionsHtml += '</div>';
                 }
                 
+                // 组装动态沙箱行为
+                let dynamicHtml = '<div class="alert alert-secondary border-0">未接入动态沙箱环境，缺乏运行时取证数据。</div>';
+                if (dynamicAnalysis && !dynamicAnalysis.error) {
+                    dynamicHtml = `
+                        <div class="row mb-3 bg-white p-3 rounded shadow-sm mx-0">
+                            <div class="col-4"><strong>沙箱装载:</strong> ${dynamicAnalysis.apk_installed ? '✅ 完成' : '❌ 失败'}</div>
+                            <div class="col-4"><strong>应用起爆:</strong> ${dynamicAnalysis.app_started ? '✅ 成功' : '❌ 阻断'}</div>
+                            <div class="col-4"><strong>交互模拟:</strong> ${dynamicAnalysis.user_interactions ? '✅ 触发' : '❌ 无响应'}</div>
+                        </div>
+                    `;
+                    
+                    if (dynamicAnalysis.network_traffic?.length > 0) {
+                        dynamicHtml += `
+                            <p class="mb-2 fw-bold text-dark"><span class="fs-5">🌐</span> 外联网络嗅探 (数据包截获)</p>
+                            <div class="bg-dark text-success p-3 rounded font-monospace shadow-inner mb-3" style="max-height: 200px; overflow-y: auto; font-size: 0.85em; line-height: 1.8;">
+                                ${dynamicAnalysis.network_traffic.join('<br>')}
+                            </div>
+                        `;
+                    }
+
+                    if (dynamicAnalysis.frida_analysis) {
+                        const frida = dynamicAnalysis.frida_analysis;
+                        dynamicHtml += `<div class="p-3 bg-white border border-info rounded shadow-sm">
+                            <h6 class="text-info fw-bold mb-3"><span class="fs-5">💉</span> Frida 深度探针检测结果</h6>`;
+                        if (frida.error) {
+                            dynamicHtml += `<p class="text-danger mb-0">探针注入失败或被加壳环境防御: ${frida.error}</p>`;
+                        } else {
+                            dynamicHtml += `
+                                <div class="d-flex gap-3">
+                                    <div class="badge bg-secondary p-2 px-3 fs-6 rounded-pill">拦截 API 调用: <span class="text-warning">${frida.summary?.total_api_calls || 0} 次</span></div>
+                                    <div class="badge bg-secondary p-2 px-3 fs-6 rounded-pill">命中敏感类: <span class="text-warning">${frida.summary?.total_hooked_apis || 0} 个</span></div>
+                                    <div class="badge bg-secondary p-2 px-3 fs-6 rounded-pill">侦测时长: <span class="text-info">${parseFloat(frida.summary?.duration || 0).toFixed(1)} s</span></div>
+                                </div>
+                            `;
+                        }
+                        dynamicHtml += `</div>`;
+                    }
+                }
+                
+                const cnRisk = translateRisk(app.risk_assessment?.risk_level);
+                const score = app.risk_assessment?.total_score || 0;
+
                 content.innerHTML = `
-                    <div class="row">
+                    <div class="row g-4">
                         <div class="col-md-6">
-                            <h6>基本信息</h6>
-                            <p><strong>APK文件:</strong> ${app.apk_file || '未知'}</p>
-                            <p><strong>包名:</strong> ${app.package_name || '未知'}</p>
-                            <p><strong>风险等级:</strong> ${app.risk_assessment && app.risk_assessment.risk_level ? app.risk_assessment.risk_level : '未知'}</p>
-                            <p><strong>风险评分:</strong> ${app.risk_assessment && app.risk_assessment.total_score ? app.risk_assessment.total_score : '0'}</p>
+                            <div class="card h-100 border-0 shadow-sm bg-white border-top border-4 border-primary">
+                                <div class="card-body">
+                                    <h5 class="text-dark fw-bold mb-3">基础元数据提取</h5>
+                                    <ul class="list-group list-group-flush text-muted">
+                                        <li class="list-group-item px-0"><strong>检材名称：</strong> ${app.apk_file || '未知'}</li>
+                                        <li class="list-group-item px-0"><strong>包名标识：</strong> <span class="font-monospace">${app.package_name || '未知'}</span></li>
+                                        <li class="list-group-item px-0 d-flex justify-content-between align-items-center">
+                                            <strong>公安研判定级：</strong> <span class="badge bg-${getRiskBadgeClass(app.risk_assessment?.risk_level)} fs-6 px-3">${cnRisk}</span>
+                                        </li>
+                                        <li class="list-group-item px-0 d-flex justify-content-between align-items-center">
+                                            <strong>违法量化积分：</strong> <span class="text-danger fw-bold fs-4">${score}</span>
+                                        </li>
+                                    </ul>
+                                </div>
+                            </div>
                         </div>
                         <div class="col-md-6">
-                            <h6>权限分析</h6>
-                            <p><strong>权限总数:</strong> ${app.static_analysis && app.static_analysis.total_permissions ? app.static_analysis.total_permissions : '0'}</p>
-                            <p><strong>危险权限数:</strong> ${app.static_analysis && app.static_analysis.permission_analysis && app.static_analysis.permission_analysis.dangerous_permissions ? app.static_analysis.permission_analysis.dangerous_permissions.length : '0'}</p>
-                            <p><strong>高风险权限数:</strong> ${app.static_analysis && app.static_analysis.permission_analysis && app.static_analysis.permission_analysis.high_risk_permissions ? app.static_analysis.permission_analysis.high_risk_permissions.length : '0'}</p>
+                            <div class="card h-100 border-0 shadow-sm bg-white border-top border-4 border-danger">
+                                <div class="card-body">
+                                    <h5 class="text-dark fw-bold mb-3">违规索权统计基线</h5>
+                                    <div class="d-flex justify-content-between text-center mt-4">
+                                        <div>
+                                            <h2 class="fw-bold">${app.static_analysis?.total_permissions || 0}</h2>
+                                            <span class="text-muted small">声明总数</span>
+                                        </div>
+                                        <div>
+                                            <h2 class="fw-bold text-warning">${app.static_analysis?.permission_analysis?.dangerous_permissions?.length || 0}</h2>
+                                            <span class="text-muted small">一般危险越界</span>
+                                        </div>
+                                        <div>
+                                            <h2 class="fw-bold text-danger">${app.static_analysis?.permission_analysis?.high_risk_permissions?.length || 0}</h2>
+                                            <span class="text-muted small">极高危隐私侵犯</span>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
                         </div>
                     </div>
-                    <hr>
-                    ${permissionsHtml}
+                    
+                    <h5 class="mt-4 fw-bold text-dark border-start border-5 border-info ps-3">二、动态沙箱取证特征</h5>
+                    <div class="p-2 mb-4">
+                        ${dynamicHtml}
+                    </div>
+
+                    <h5 class="fw-bold text-dark border-start border-5 border-primary ps-3">一、静态拆包权限图谱</h5>
+                    <div class="p-3 bg-white rounded shadow-sm mt-3">
+                        ${permissionsHtml}
+                    </div>
                 `;
-                
-                const modal = new bootstrap.Modal(document.getElementById('appDetailModal'));
-                modal.show();
             } catch (error) {
-                console.error('显示应用详情失败:', error);
+                content.innerHTML = `<div class="alert alert-danger">电子数据解析失败: ${error.message}</div>`;
             }
         }
 
-        // 页面加载完成后执行
-        document.addEventListener('DOMContentLoaded', function() {
-            console.log('页面加载完成，开始加载数据...');
-            loadSummary();
-            loadRiskDistribution();
-            loadApps();
-            loadPermissions();
-            loadPermissionRisks();
-            console.log('数据加载完成');
+        // ==================================================
+        // 核心实战功能：导出标准化电子取证报告 (Print to PDF)
+        // ==================================================
+        function exportEvidenceReport() {
+            if (!detailCacheApp) {
+                alert("数据尚未加载完成，无法导出报告！");
+                return;
+            }
+            const app = detailCacheApp;
+            const dyn = detailCacheDyn;
+            
+            const reportWindow = window.open('', '_blank');
+            
+            // 构建高危权限表格
+            let highRiskRows = '';
+            if (app.static_analysis?.permission_analysis?.permission_details) {
+                const perms = app.static_analysis.permission_analysis.permission_details.filter(p => p.main_risk_level.includes('高'));
+                perms.forEach((p, i) => {
+                    highRiskRows += `<tr><td>${i+1}</td><td>${p.name}</td><td style="color:red; font-weight:bold;">${p.risk_level}</td></tr>`;
+                });
+                if(perms.length === 0) highRiskRows = `<tr><td colspan="3" style="text-align:center;">本次检材未发现极高危权限</td></tr>`;
+            }
+
+            // 构建网络嗅探记录
+            let networkStr = '未捕获到异常外联数据。';
+            if (dyn && dyn.network_traffic && dyn.network_traffic.length > 0) {
+                networkStr = dyn.network_traffic.join('<br/>');
+            }
+
+            // Frida 探针状态
+            let fridaStr = '探针未生效或未配置注入。';
+            if (dyn && dyn.frida_analysis && !dyn.frida_analysis.error) {
+                fridaStr = `拦截到敏感越权调用 <b>${dyn.frida_analysis.summary?.total_api_calls||0}</b> 次，涵盖 <b>${dyn.frida_analysis.summary?.total_hooked_apis||0}</b> 个敏感API类。`;
+            } else if (dyn && dyn.frida_analysis && dyn.frida_analysis.error) {
+                fridaStr = `探针注入遭遇应用对抗防御，错误日志：${dyn.frida_analysis.error}`;
+            }
+
+            const htmlContent = `
+                <!DOCTYPE html>
+                <html>
+                <head>
+                    <meta charset="utf-8">
+                    <title>电子数据取证分析报告 - ${app.apk_file || '未知检材'}</title>
+                    <style>
+                        body { font-family: 'SimSun', '宋体', serif; padding: 40px; line-height: 1.8; color: #000; background: #fff; max-width: 900px; margin: 0 auto;}
+                        h1 { text-align: center; font-size: 28px; margin-bottom: 50px; letter-spacing: 2px; }
+                        h2 { border-bottom: 2px solid #000; padding-bottom: 5px; font-size: 20px; margin-top: 30px; }
+                        h3 { font-size: 16px; margin-top: 20px; }
+                        .meta-info { margin-bottom: 30px; font-size: 16px; background: #f9f9f9; padding: 20px; border: 1px solid #ccc; }
+                        .meta-info p { margin: 5px 0; }
+                        table { width: 100%; border-collapse: collapse; margin-top: 15px; margin-bottom: 15px; font-size: 14px; }
+                        th, td { border: 1px solid #000; padding: 10px; text-align: left; }
+                        th { background-color: #eee; font-weight: bold; }
+                        .danger { color: #d32f2f; font-weight: bold; }
+                        .code-block { font-family: monospace; background: #f4f4f4; padding: 15px; border: 1px solid #ddd; white-space: pre-wrap; font-size: 12px; line-height: 1.5; word-break: break-all;}
+                        .footer { margin-top: 60px; text-align: right; font-size: 14px; }
+                        .seal { margin-top: 20px; height: 100px; text-align: right; padding-right: 50px; }
+                        @media print { body { padding: 0; } .no-print { display: none; } }
+                    </style>
+                </head>
+                <body>
+                    <div class="no-print" style="text-align:center; padding: 10px; background: #ffebee; color: #c62828; margin-bottom: 20px; border: 1px solid #ef9a9a;">
+                        提示：请使用浏览器快捷键 Ctrl+P (Windows) 或 Cmd+P (Mac) 另存为 PDF 文件。
+                    </div>
+                    
+                    <h1>APP违法违规收集个人信息电子取证报告</h1>
+                    
+                    <div class="meta-info">
+                        <p><strong>取证时间：</strong> ${new Date().toLocaleString('zh-CN', {hour12: false})}</p>
+                        <p><strong>检材名称：</strong> ${app.apk_file || '未提供'}</p>
+                        <p><strong>应用包名：</strong> ${app.package_name || '未提供'}</p>
+                        <p><strong>研判结论定级：</strong> <span class="${app.risk_assessment?.risk_level === 'high' ? 'danger' : ''}">评估为 ${translateRisk(app.risk_assessment?.risk_level)} （总侵害定损评分：${app.risk_assessment?.total_score || 0} 分）</span></p>
+                    </div>
+
+                    <h2>一、 静态拆包与敏感权限声明分析</h2>
+                    <p>经脱壳及清单解析，发现该程序共声明系统权限 <b>${app.static_analysis?.total_permissions || 0}</b> 项，其中涉及窃取或越界收集隐私的高危项目如下：</p>
+                    <table>
+                        <thead>
+                            <tr><th width="10%">序号</th><th width="60%">越权标识 (Permission Name)</th><th width="30%">危害评级</th></tr>
+                        </thead>
+                        <tbody>
+                            ${highRiskRows}
+                        </tbody>
+                    </table>
+
+                    <h2>二、 动态沙箱行为取证</h2>
+                    <p>将该涉案检材置入具有反检测特性的沙箱环境运行，提取到以下关键取证要素：</p>
+                    
+                    <h3>1. 运行时外联网络探测</h3>
+                    <p>截获应用在后台暗中建立的网络通信节点，该数据可能涉及隐私信息外传：</p>
+                    <div class="code-block">${networkStr}</div>
+
+                    <h3>2. 深度行为探针 (Frida Hook)</h3>
+                    <p>对系统的敏感服务（如通讯录、短信、IMEI、相册等）实施底层挂钩检测，取证结果：</p>
+                    <div class="code-block">${fridaStr}</div>
+
+                    <h2>三、 综合研判结论</h2>
+                    <p>依据《APP违法违规收集使用个人信息行为认定方法》等相关规定，结合上述静态签名和动态沙箱行为分析，该程序存在<b>${translateRisk(app.risk_assessment?.risk_level)}</b>。建议相关办案单位以此报告为线索，对涉及的后台服务器 IP 及数据流向开展进一步溯源打击。</p>
+
+                    <div class="footer">
+                        <p>出证系统：全景隐私安全预警与电子取证平台</p>
+                        <p>生成日期：${new Date().toLocaleDateString('zh-CN')}</p>
+                        <div class="seal">[ 自动生成，取证专用 ]</div>
+                    </div>
+                    
+                    <script>
+                        // 自动触发打印窗口
+                        setTimeout(() => { window.print(); }, 500);
+                    <\/script>
+                </body>
+                </html>
+            `;
+            
+            reportWindow.document.open();
+            reportWindow.document.write(htmlContent);
+            reportWindow.document.close();
+        }
+
+        // ==================================================
+        // 系统初始化启动
+        // ==================================================
+        document.addEventListener('DOMContentLoaded', async () => {
+            try {
+                // 并发极速加载数据
+                await Promise.all([
+                    loadSummary(),
+                    loadPermissionRiskData(),
+                    loadApps(),
+                    loadPermissions()
+                ]);
+                document.getElementById('loading-overlay').style.display = 'none';
+            } catch (e) {
+                console.error("系统引擎初始化失败", e);
+                document.getElementById('loading-overlay').querySelector('h5').innerText = "数据库接入异常，请检查后端运行状态。";
+                document.getElementById('loading-overlay').querySelector('.spinner-border').style.display = 'none';
+            }
         });
     </script>
 </body>

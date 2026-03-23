@@ -109,6 +109,8 @@ class DynamicAnalyzer:
         # 先直接检查设备是否已连接
         if self.check_device_connected():
             print("设备已连接，无需重启ADB")
+            # 启动frida服务器
+            self._start_frida_server()
             return True
 
         # 如果未连接，再尝试重启ADB服务
@@ -119,7 +121,7 @@ class DynamicAnalyzer:
         time.sleep(3)
 
         # 主动连接夜神模拟器端口（根据你的实际端口修改）
-        simulator_port = "62026"  # 可从配置文件读取
+        simulator_port = "62025"  # 可从配置文件读取
         self._run_adb_command(["connect", f"127.0.0.1:{simulator_port}"])
         time.sleep(2)
 
@@ -127,11 +129,52 @@ class DynamicAnalyzer:
         for i in range(max_retries):
             print(f"尝试连接设备 ({i+1}/{max_retries})...")
             if self.check_device_connected():
+                # 启动frida服务器
+                self._start_frida_server()
                 return True
             time.sleep(2)
 
         print("无法连接到设备，请确保夜神模拟器已启动并授权调试")
         return False
+    
+    def _start_frida_server(self):
+        """启动手机端的frida服务器"""
+        print("\n开始启动frida服务器...")
+        nox_adb_path = r"E:\Nox\bin\nox_adb.exe"
+        
+        # 检查nox_adb.exe是否存在
+        if not os.path.exists(nox_adb_path):
+            print(f"错误: 未找到 {nox_adb_path}")
+            return
+        
+        try:
+            # 1. 进入手机终端并获取root权限，然后启动frida服务器
+            print("1. 进入手机终端并获取root权限...")
+            # 2. 启动frida服务器
+            print("2. 启动frida服务器...")
+            
+            # 构建命令：使用nox_adb.exe shell执行su命令，然后在root权限下启动frida服务器
+            frida_cmd = [
+                nox_adb_path,
+                "shell",
+                "su",
+                "-c",
+                "./data/local/tmp/frida-server-17.7.3-android-x86_64 &"
+            ]
+            
+            # 执行启动frida服务器的命令
+            result = subprocess.run(frida_cmd, capture_output=True, text=True, timeout=10)
+            print(f"frida服务器启动命令执行结果: {result.returncode}")
+            if result.stdout:
+                print(f"输出: {result.stdout}")
+            if result.stderr:
+                print(f"错误: {result.stderr}")
+            
+            # 等待frida服务器启动
+            time.sleep(3)
+            print("frida服务器启动完成！")
+        except Exception as e:
+            print(f"启动frida服务器时出错: {e}")
     
     def install_apk(self, timeout=120): # 增加超时时间
         print(f"正在安装 APK: {self.apk_path}")
@@ -488,8 +531,7 @@ class DynamicAnalyzer:
         process = subprocess.Popen(
             [self.adb_path, "logcat"],
             stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True
+            stderr=subprocess.PIPE
         )
         
         start_time = time.time()
@@ -514,26 +556,43 @@ class DynamicAnalyzer:
             # 使用tqdm显示监控进度
             with tqdm(total=duration, desc="监控敏感API调用", unit="秒") as pbar:
                 while time.time() - start_time < duration:
-                    line = process.stdout.readline()
-                    if not line:
-                        time.sleep(0.1)
+                    try:
+                        line = process.stdout.readline()
+                        if not line:
+                            time.sleep(0.1)
+                            continue
+                        
+                        # 处理编码问题 - 增强版
+                        try:
+                            line = line.decode('utf-8')
+                        except UnicodeDecodeError:
+                            try:
+                                line = line.decode('gbk', errors='replace')
+                            except UnicodeDecodeError:
+                                try:
+                                    line = line.decode('latin-1', errors='replace')
+                                except:
+                                    line = str(line)
+                        
+                        # 检查敏感API调用
+                        for api, patterns in sensitive_patterns.items():
+                            for pattern in patterns:
+                                if pattern.lower() in line.lower():
+                                    if api not in detected_apis:
+                                        detected_apis[api] = {
+                                            "description": self.sensitive_apis.get(api, api),
+                                            "count": 0,
+                                            "logs": []
+                                        }
+                                    detected_apis[api]["count"] += 1
+                                    detected_apis[api]["logs"].append(line.strip())
+                                    self.monitoring_logs.append(line.strip())
+                                    
+                                    print(f"检测到敏感API调用: {self.sensitive_apis.get(api, api)}")
+                    except Exception as e:
+                        print(f"处理日志行时出错: {e}")
+                        # 继续处理下一行，避免整个监控过程中断
                         continue
-                    
-                    # 检查敏感API调用
-                    for api, patterns in sensitive_patterns.items():
-                        for pattern in patterns:
-                            if pattern.lower() in line.lower():
-                                if api not in detected_apis:
-                                    detected_apis[api] = {
-                                        "description": self.sensitive_apis.get(api, api),
-                                        "count": 0,
-                                        "logs": []
-                                    }
-                                detected_apis[api]["count"] += 1
-                                detected_apis[api]["logs"].append(line.strip())
-                                self.monitoring_logs.append(line.strip())
-                                
-                                print(f"检测到敏感API调用: {self.sensitive_apis.get(api, api)}")
                     
                     # 更新进度条
                     elapsed = time.time() - start_time
@@ -541,6 +600,9 @@ class DynamicAnalyzer:
                     time.sleep(0.1)
         except KeyboardInterrupt:
             pass
+        except Exception as e:
+            print(f"监控敏感API调用时发生错误: {e}")
+            # 即使发生错误，也要返回已检测到的API调用
         finally:
             process.terminate()
             try:
@@ -634,9 +696,11 @@ class DynamicAnalyzer:
         print("开始Frida动态行为监控...")
         
         if not self.package_name:
+            print("包名未知，无法执行Frida分析")
             return {"error": "包名未知，无法执行Frida分析"}
         
         if not self.frida_analyzer:
+            print("Frida 模块未安装，跳过 Frida 分析")
             return {"error": "Frida 模块未安装，跳过 Frida 分析"}
         
         try:
@@ -647,17 +711,25 @@ class DynamicAnalyzer:
                 self.start_app() # 尝试启动
                 time.sleep(3) # 等待缓冲
             
+            print(f"[Frida] 准备执行分析，包名: {self.package_name}")
+            
             # 调用 frida_analyzer 的执行方法
             # 注意：这里我们让 frida_analyzer 内部处理进程是否存在的问题
             frida_results = self.frida_analyzer.perform_frida_analysis(duration=30)
             
+            print(f"[Frida] 分析结果: {frida_results}")
+            
             frida_summary = self.frida_analyzer.get_frida_summary()
+            print(f"[Frida] 分析摘要: {frida_summary}")
+            
             return {
                 "results": frida_results,
                 "summary": frida_summary
             }
         except Exception as e:
             print(f"执行Frida分析时出错: {e}")
+            import traceback
+            traceback.print_exc()
             return {"error": str(e)}
     
     def perform_dynamic_analysis(self) -> Dict:
@@ -720,9 +792,19 @@ class DynamicAnalyzer:
                         analysis_result["errors"].append("用户交互模拟失败")
                     analysis_result["user_interactions"] = True
                 elif step_name == "监控敏感API调用":
-                    analysis_result["sensitive_api_calls"] = step_func()
+                    try:
+                        analysis_result["sensitive_api_calls"] = step_func()
+                    except Exception as e:
+                        print(f"监控敏感API调用时出错: {e}")
+                        analysis_result["errors"].append(f"监控敏感API调用失败: {str(e)}")
+                        # 继续执行其他步骤，不中断整个分析过程
                 elif step_name == "Frida动态行为监控":
-                    analysis_result["frida_analysis"] = step_func()
+                    try:
+                        analysis_result["frida_analysis"] = step_func()
+                    except Exception as e:
+                        print(f"Frida动态行为监控时出错: {e}")
+                        analysis_result["errors"].append(f"Frida动态行为监控失败: {str(e)}")
+                        # 继续执行其他步骤，不中断整个分析过程
                 elif step_name == "获取网络流量":
                     analysis_result["network_traffic"] = step_func()
                 elif step_name == "获取电池使用情况":

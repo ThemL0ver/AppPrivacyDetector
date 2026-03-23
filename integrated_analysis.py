@@ -139,15 +139,9 @@ class IntegratedAnalyzer:
         
         print("=" * 50)
     
-    def run_full_analysis(self, skip_dynamic: bool = False):
+    def run_full_analysis(self):
         static_results = self.perform_static_analysis()
-        
-        if skip_dynamic:
-            print("跳过动态分析")
-            dynamic_results = []
-        else:
-            dynamic_results = self.perform_dynamic_analysis()
-        
+        dynamic_results = self.perform_dynamic_analysis()
         report = self.generate_integrated_report(static_results, dynamic_results)
         
         return report

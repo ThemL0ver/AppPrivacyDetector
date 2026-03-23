@@ -1,7 +1,94 @@
 // 敏感API Hook脚本 - Frida
 Java.perform(function () {
     console.log("[Hook] 开始Hook敏感API...");
-    
+
+    // ==========================================
+    // 0. 通用 Root 和 环境检测绕过 (Bypass Root & Emulator)
+    // ==========================================
+    console.log("[Hook] 开始加载Root检测和环境检测绕过...");
+    try {
+        var File = Java.use("java.io.File");
+        var Runtime = Java.use("java.lang.Runtime");
+        var PackageManager = Java.use("android.app.ApplicationPackageManager");
+        var StringClass = Java.use("java.lang.String");
+
+        // 常见 Root 文件和 Frida 文件特征
+        var rootFiles = [
+            "/system/app/Superuser.apk",
+            "/sbin/su",
+            "/system/bin/su",
+            "/system/xbin/su",
+            "/data/local/xbin/su",
+            "/data/local/bin/su",
+            "/system/sd/xbin/su",
+            "/system/bin/failsafe/su",
+            "/data/local/su",
+            "/su/bin/su",
+            "/data/local/tmp/frida-server",
+            "/data/local/tmp/frida-server-17.7.3-android-x86_64", // 针对你当前使用的版本
+            "frida",
+            "magisk"
+        ];
+
+        // Hook File.exists()
+        File.exists.implementation = function () {
+            var path = this.getAbsolutePath();
+            for (var i = 0; i < rootFiles.length; i++) {
+                if (path.indexOf(rootFiles[i]) !== -1) {
+                    // console.log("[Bypass] 拦截到 Root 文件检测: " + path);
+                    return false; // 欺骗应用，告诉它文件不存在
+                }
+            }
+            return this.exists();
+        };
+
+        // Hook Runtime.exec() 拦截 shell 命令如 `su` 和 `which su`
+        Runtime.exec.overload('java.lang.String').implementation = function (command) {
+            if (command.indexOf("su") !== -1 || command.indexOf("which") !== -1 || command.indexOf("magisk") !== -1) {
+                // console.log("[Bypass] 拦截到命令执行: " + command);
+                command = "invalid_command"; // 替换为一个无效命令
+            }
+            return this.exec.overload('java.lang.String').call(this, command);
+        };
+
+        Runtime.exec.overload('[Ljava.lang.String;').implementation = function (cmdarray) {
+            if (cmdarray.length > 0 && (cmdarray[0].indexOf("su") !== -1 || cmdarray[0].indexOf("which") !== -1)) {
+                // console.log("[Bypass] 拦截到命令执行数组: " + cmdarray[0]);
+                cmdarray[0] = "invalid_command";
+            }
+            return this.exec.overload('[Ljava.lang.String;').call(this, cmdarray);
+        };
+
+        // Hook PackageManager.getPackageInfo 拦截 Root 管理软件的包名检测
+        PackageManager.getPackageInfo.overload('java.lang.String', 'int').implementation = function (pkgName, flags) {
+            var rootPackages = [
+                "com.noshufou.android.su",
+                "eu.chainfire.supersu",
+                "com.topjohnwu.magisk",
+                "com.koushikdutta.superuser"
+            ];
+            for (var i = 0; i < rootPackages.length; i++) {
+                if (pkgName == rootPackages[i]) {
+                    // console.log("[Bypass] 拦截到包名检测: " + pkgName);
+                    var NameNotFoundException = Java.use("android.content.pm.PackageManager$NameNotFoundException");
+                    throw NameNotFoundException.$new("Package not found");
+                }
+            }
+            return this.getPackageInfo(pkgName, flags);
+        };
+
+        // 绕过 Build 属性检测 (如 test-keys 检测)
+        var Build = Java.use("android.os.Build");
+        if (Build.TAGS.value.indexOf("test-keys") !== -1) {
+            Build.TAGS.value = "release-keys";
+        }
+        console.log("[Hook] Root检测绕过逻辑加载完成。");
+    } catch (e) {
+        console.log("[Hook] Root检测绕过逻辑加载失败: " + e);
+    }
+    // ==========================================
+
+
     // 1. 设备标识符相关API
     console.log("[Hook] 开始Hook设备标识符API...");
     
@@ -70,7 +157,7 @@ Java.perform(function () {
         
         // 修改设备信息属性
         Object.getOwnPropertyNames(Build.class).forEach(function(name) {
-            if (name !== "$class" && name !== "$super" && typeof Build[name] === "string") {
+            if (name !== "$class" && name !== "$super" && typeof Build[name] === "string" && name !== "TAGS") {
                 Object.defineProperty(Build.class, name, {
                     get: function() {
                         send({

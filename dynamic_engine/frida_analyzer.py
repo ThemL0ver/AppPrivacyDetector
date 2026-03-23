@@ -29,20 +29,31 @@ class FridaDynamicAnalyzer:
             return False
         
         # 启动Hook会话
-        if not self.hook_manager.start(spawn=spawn):
+        success, pid = self.hook_manager.start(spawn=spawn)
+        if not success:
             # 尝试以spawn方式启动
-            if not self.hook_manager.start(spawn=True):
+            print("[Frida] 尝试以spawn方式启动...")
+            success, pid = self.hook_manager.start(spawn=True)
+            if not success:
                 self.hook_results["errors"].append("无法启动Hook会话")
                 return False
         
         # 加载Hook脚本
         script_path = os.path.join(os.path.dirname(__file__), "hooks", "sensitive_api_hook.js")
-        if not self.hook_manager.load_script(script_path):
-            self.hook_results["errors"].append("无法加载Hook脚本")
-            return False
+        print(f"[Frida] 加载Hook脚本: {script_path}")
         
-        print("[Frida] Hook启动成功！开始监控敏感API调用...")
-        return True
+        # 尝试多次加载脚本
+        max_retries = 3
+        for retry in range(max_retries):
+            if self.hook_manager.load_script(script_path, pid):
+                print("[Frida] Hook启动成功！开始监控敏感API调用...")
+                return True
+            else:
+                print(f"[Frida] 加载脚本失败，尝试第 {retry+1}/{max_retries} 次...")
+                time.sleep(2)
+        
+        self.hook_results["errors"].append("无法加载Hook脚本")
+        return False
     
     def monitor(self, duration: int = 60) -> Dict:
         """监控敏感API调用"""

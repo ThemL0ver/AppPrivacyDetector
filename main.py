@@ -28,7 +28,7 @@ def main():
     analyzer = IntegratedAnalyzer(samples_dir, results_dir)
     
     print("\n开始执行完整分析流程...")
-    report = analyzer.run_full_analysis(skip_dynamic=args.skip_dynamic)
+    report = analyzer.run_full_analysis()
     
     print("\n" + "=" * 60)
     print("分析完成！")

@@ -1,0 +1,64 @@
+1.frida_analyzer.py 代码逻辑优化
+该错误通常发生在 frida.get_usb_device() 或 device.spawn() 环节。建议在 frida_analyzer.py 中增加更详细的异常捕获，以确定具体原因。
+
+建议修改点：
+如果你的代码是直接 attach 进程，而应用还没启动，会导致失败。对于“去哪儿”这类大型应用，建议使用 spawn 模式。
+
+# 修改 frida_analyzer.py 中的启动逻辑部分
+import frida
+import time
+
+def start_frida_hook(package_name, script_path):
+    try:
+        # 1. 获取 USB 设备
+        device = frida.get_usb_device(timeout=10) # 增加超时时间
+        
+        # 2. 启动应用 (Spawn 模式)
+        print(f"[*] 正在启动应用: {package_name}")
+        pid = device.spawn([package_name])
+        session = device.attach(pid)
+        
+        # 3. 加载 JS 脚本 (来自 sensitive_api_hook.js)
+        with open(script_path, 'r', encoding='utf-8') as f:
+            source = f.read()
+        script = session.create_script(source)
+        
+        # 加载脚本
+        script.load()
+        
+        # 4. 恢复进程
+        device.resume(pid)
+        print("[+] Frida Hook 已成功挂载")
+        
+    except frida.ServerNotRunningError:
+        return {"error": "Frida Server 未在设备上启动"}
+    except frida.TimedOutError:
+        return {"error": "连接设备超时，请检查USB连接"}
+    except Exception as e:
+        return {"error": f"发生未知错误: {str(e)}"}
+
+2. 检查包名（Package Name）
+gowhere.apk 的真实包名可能不是 gowhere。如果 main.py 传递给 frida_analyzer.py 的包名错误，Frida 将无法找到进程。
+
+你可以通过 apk_analyzer.py（静态分析模块）提取准确的 package 属性。
+确认 main.py 调用动态分析时传入的是 com.Qunar.Whatever 这样的格式，而不是文件名。
+
+3. sensitive_api_hook.js 的兼容性
+去哪儿旅行（Qunar）这类应用通常有比较强的检测机制或使用了加固（壳）。
+
+如果是加固导致的问题：sensitive_api_hook.js 可能无法在应用启动瞬间 Hook 到系统 API。
+解决方案：尝试在 script.load() 后添加一点延迟，或者在 JS 脚本中使用 Java.performNow。
+
+4. 调试建议
+为了找出具体报错原因，你可以手动在终端运行一个独立的测试脚本：
+
+手动打开“去哪儿旅行”手机 App。
+新建一个 test_frida.py：
+import frida
+try:
+    device = frida.get_usb_device()
+    process = device.attach("去哪儿旅行的包名")
+    print("连接成功！")
+except Exception as e:
+    print(f"失败原因: {e}")
+根据该脚本给出的报错信息（如 Process not found 或 Permission Denied）来针对性修改。
