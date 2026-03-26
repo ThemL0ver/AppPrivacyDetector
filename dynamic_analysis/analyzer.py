@@ -23,9 +23,19 @@ class DynamicAnalyzer:
         self.adb_path = self._find_adb()
         self.sensitive_apis = self._load_sensitive_apis()
         self.monitoring_logs = []
-        self.frida_analyzer = EnhancedDynamicAnalyzer(apk_path, output_dir) if frida_available else None
+        self.frida_analyzer = None
         self.device_id = None
         self.app_pid = None
+        
+        # 创建并初始化Frida分析器
+        if frida_available:
+            self.frida_analyzer = EnhancedDynamicAnalyzer(apk_path, output_dir)
+            # 立即设置包名
+            if self.package_name:
+                self.frida_analyzer.set_package_name(self.package_name)
+                print(f"[Frida] 已设置包名: {self.package_name}")
+            else:
+                print(f"[Frida] 警告: 包名提取失败，Frida分析可能无法执行")
         
     def _find_adb(self) -> str:
         """查找ADB工具路径"""
@@ -72,7 +82,12 @@ class DynamicAnalyzer:
     
     def _run_adb_command(self, command: List[str], timeout: int = 10) -> Optional[str]:
         try:
-            full_command = [self.adb_path] + command
+            # 如果有设备ID，在命令前添加 -s 参数指定设备
+            full_command = [self.adb_path]
+            if self.device_id:
+                full_command.extend(["-s", self.device_id])
+            full_command.extend(command)
+            
             proc = subprocess.Popen(full_command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
             try:
                 stdout, stderr = proc.communicate(timeout=timeout)
@@ -95,11 +110,20 @@ class DynamicAnalyzer:
         if output and "device" in output:
             # 提取设备ID
             lines = output.strip().split('\n')
+            devices = []
             for line in lines[1:]:  # 跳过第一行标题
                 if "device" in line:
-                    self.device_id = line.split('\t')[0]
-                    print(f"设备已连接: {self.device_id}")
-                    return True
+                    device_id = line.split('\t')[0]
+                    devices.append(device_id)
+            
+            if devices:
+                # 如果有多个设备，选择第一个
+                self.device_id = devices[0]
+                print(f"找到 {len(devices)} 个设备，选择: {self.device_id}")
+                return True
+            else:
+                print("设备未连接，请确保夜神模拟器已启动")
+                return False
         else:
             print("设备未连接，请确保夜神模拟器已启动")
             return False
@@ -138,43 +162,92 @@ class DynamicAnalyzer:
         return False
     
     def _start_frida_server(self):
-        """启动手机端的frida服务器"""
+        """
+        启动设备端 frida-server 并完成端口转发。
+        这是 Frida Python 客户端能够连接设备的必要前置条件。
+        """
         print("\n开始启动frida服务器...")
         nox_adb_path = r"E:\Nox\bin\nox_adb.exe"
-        
-        # 检查nox_adb.exe是否存在
+        # frida-server 在设备内部的路径（根据你的实际文件名调整）
+        frida_server_path = "/data/local/tmp/frida-server-17.7.3-android-x86_64"
+        # Frida 默认监听端口
+        frida_port = 27042
+
         if not os.path.exists(nox_adb_path):
-            print(f"错误: 未找到 {nox_adb_path}")
-            return
-        
+            print(f"错误: 未找到 {nox_adb_path}，请检查夜神模拟器安装路径")
+            return False
+
         try:
-            # 1. 进入手机终端并获取root权限，然后启动frida服务器
-            print("1. 进入手机终端并获取root权限...")
-            # 2. 启动frida服务器
-            print("2. 启动frida服务器...")
-            
-            # 构建命令：使用nox_adb.exe shell执行su命令，然后在root权限下启动frida服务器
-            frida_cmd = [
-                nox_adb_path,
-                "shell",
-                "su",
-                "-c",
-                "./data/local/tmp/frida-server-17.7.3-android-x86_64 &"
-            ]
-            
-            # 执行启动frida服务器的命令
-            result = subprocess.run(frida_cmd, capture_output=True, text=True, timeout=10)
-            print(f"frida服务器启动命令执行结果: {result.returncode}")
-            if result.stdout:
-                print(f"输出: {result.stdout}")
-            if result.stderr:
-                print(f"错误: {result.stderr}")
-            
-            # 等待frida服务器启动
-            time.sleep(3)
+            # -------------------------------------------------------
+            # 步骤1: 检查 frida-server 是否已在运行，避免重复启动
+            # -------------------------------------------------------
+            print("1. 检查frida服务器状态...")
+            check_result = subprocess.run(
+                [nox_adb_path, "shell", "pgrep", "-f", "frida-server"],
+                capture_output=True, text=True, timeout=5
+            )
+            already_running = check_result.returncode == 0 and check_result.stdout.strip()
+
+            if already_running:
+                print(f"frida-server 已在运行 (PID: {check_result.stdout.strip()})")
+            else:
+                # -------------------------------------------------------
+                # 步骤2: 以 root 身份后台启动 frida-server
+                # -------------------------------------------------------
+                print("2. 检查frida服务器状态...")
+                print("3. 启动frida服务器...")
+                start_cmd = [
+                    nox_adb_path, "shell",
+                    "su", "-c",
+                    f"chmod 755 {frida_server_path} && {frida_server_path} -D &"
+                ]
+                result = subprocess.run(
+                    start_cmd, capture_output=True, text=True, timeout=10
+                )
+                print(f"frida服务器启动命令执行结果: {result.returncode}")
+                if result.stderr and "error" in result.stderr.lower():
+                    print(f"启动警告: {result.stderr.strip()}")
+
+                # 等待 frida-server 完成初始化（监听端口需要1-2秒）
+                print("等待 frida-server 初始化 (3秒)...")
+                time.sleep(3)
+
+                # 验证是否真正启动成功
+                verify_result = subprocess.run(
+                    [nox_adb_path, "shell", "pgrep", "-f", "frida-server"],
+                    capture_output=True, text=True, timeout=5
+                )
+                if verify_result.returncode != 0 or not verify_result.stdout.strip():
+                    print("错误: frida-server 启动失败！请手动检查设备。")
+                    print("  提示: 请确认 frida-server 文件存在且有执行权限，并且设备已获取root。")
+                    return False
+                print(f"frida-server 启动成功 (PID: {verify_result.stdout.strip()})")
+
+            # -------------------------------------------------------
+            # 步骤3 (核心修复): 建立 ADB 端口转发
+            # 将本机 27042 -> 设备内部 27042，让 Frida Python 客户端能连接
+            # -------------------------------------------------------
+            print(f"建立ADB端口转发: localhost:{frida_port} -> device:{frida_port}")
+            forward_result = subprocess.run(
+                [nox_adb_path, "forward", f"tcp:{frida_port}", f"tcp:{frida_port}"],
+                capture_output=True, text=True, timeout=5
+            )
+            if forward_result.returncode == 0:
+                print(f"✅ 端口转发建立成功！Frida通道已就绪。")
+            else:
+                print(f"⚠️ 端口转发失败: {forward_result.stderr.strip()}")
+                print("  提示: 请确认 nox_adb.exe 版本兼容性，或尝试使用系统 adb 替代。")
+                return False
+
             print("frida服务器启动完成！")
+            return True
+
+        except subprocess.TimeoutExpired:
+            print("启动 frida-server 超时，请检查设备连接。")
+            return False
         except Exception as e:
             print(f"启动frida服务器时出错: {e}")
+            return False
     
     def install_apk(self, timeout=120): # 增加超时时间
         print(f"正在安装 APK: {self.apk_path}")
@@ -205,6 +278,7 @@ class DynamicAnalyzer:
                         return aapt_path
         # 常见安装路径（可根据您的环境调整）
         common_paths = [
+            r"E:\\Nox\\bin\\aapt.exe",  # 用户提供的aapt路径
             r"E:\\Nox\\bin\\nox_aapt.exe",
             "aapt"  # 最后尝试环境变量
         ]
@@ -230,9 +304,23 @@ class DynamicAnalyzer:
         try:
             result = subprocess.run(
                 [aapt, "dump", "badging", self.apk_path],
-                capture_output=True, text=True, timeout=10
+                capture_output=True, timeout=10
             )
-            match = re.search(r"package: name='([^']+)'", result.stdout)
+            
+            # 处理编码问题
+            stdout = result.stdout
+            try:
+                stdout = stdout.decode('utf-8')
+            except UnicodeDecodeError:
+                try:
+                    stdout = stdout.decode('gbk', errors='replace')
+                except UnicodeDecodeError:
+                    try:
+                        stdout = stdout.decode('latin-1', errors='replace')
+                    except:
+                        stdout = str(stdout)
+            
+            match = re.search(r"package: name='([^']+)'", stdout)
             if match:
                 package = match.group(1)
                 print(f"从 APK 提取到包名: {package}")
@@ -695,13 +783,25 @@ class DynamicAnalyzer:
         """执行Frida动态行为分析"""
         print("开始Frida动态行为监控...")
         
+        # 确保包名存在
+        if not self.package_name:
+            print("包名未知，尝试从设备获取包名...")
+            self._get_package_name_from_device()
+            
+        # 再次检查包名
         if not self.package_name:
             print("包名未知，无法执行Frida分析")
             return {"error": "包名未知，无法执行Frida分析"}
         
+        # 确保Frida分析器存在
         if not self.frida_analyzer:
             print("Frida 模块未安装，跳过 Frida 分析")
             return {"error": "Frida 模块未安装，跳过 Frida 分析"}
+        
+        # 确保Frida分析器已设置包名
+        if self.frida_analyzer.package_name != self.package_name:
+            print(f"[Frida] 更新包名: {self.package_name}")
+            self.frida_analyzer.set_package_name(self.package_name)
         
         try:
             # 即使 _is_app_running() 返回 False，也不要直接退出

@@ -1,419 +1,411 @@
-// 敏感API Hook脚本 - Frida
+// ================================================================
+// APP 隐私权限动态监控脚本 (反Root检测加固 + 敏感API捕获)
+// ================================================================
 Java.perform(function () {
-    console.log("[Hook] 开始Hook敏感API...");
+    console.log("\n========================================");
+    console.log("[Hook] 注入成功，开始部署全覆盖反检测盾牌...");
+    console.log("========================================\n");
 
-    // ==========================================
-    // 0. 通用 Root 和 环境检测绕过 (Bypass Root & Emulator)
-    // ==========================================
-    console.log("[Hook] 开始加载Root检测和环境检测绕过...");
+    // ============================================================
+    // 第一优先级: 反 Root 环境检测 (必须在所有其他 Hook 之前执行)
+    // ============================================================
+    
+    // [防线1] Hook 文件系统检测 —— 拦截对 su/magisk/frida 文件路径的探测
     try {
         var File = Java.use("java.io.File");
-        var Runtime = Java.use("java.lang.Runtime");
-        var PackageManager = Java.use("android.app.ApplicationPackageManager");
-        var StringClass = Java.use("java.lang.String");
-
-        // 常见 Root 文件和 Frida 文件特征
-        var rootFiles = [
-            "/system/app/Superuser.apk",
-            "/sbin/su",
-            "/system/bin/su",
-            "/system/xbin/su",
-            "/data/local/xbin/su",
-            "/data/local/bin/su",
-            "/system/sd/xbin/su",
-            "/system/bin/failsafe/su",
-            "/data/local/su",
-            "/su/bin/su",
+        var BLOCKED_PATHS = [
+            "/sbin/su", "/system/bin/su", "/system/xbin/su",
+            "/data/local/xbin/su", "/data/local/bin/su",
+            "/system/sd/xbin/su", "/system/bin/failsafe/su",
+            "/data/local/su", "/su/bin/su", "/su/bin",
+            "/system/app/Superuser.apk", "/system/app/SuperSU.apk",
+            "/system/app/Magisk.apk",
+            "/sbin/.magisk", "/data/adb/magisk", "/data/adb/modules",
+            "/cache/.disable_selinux", "/proc/net/xt_qtaguid/ctrl",
+            "magisk", "frida", "frida-server", "re.frida.server",
             "/data/local/tmp/frida-server",
-            "/data/local/tmp/frida-server-17.7.3-android-x86_64", // 针对你当前使用的版本
-            "frida",
-            "magisk"
+            "/data/local/tmp/re.frida.server",
         ];
-
-        // Hook File.exists()
+    
         File.exists.implementation = function () {
             var path = this.getAbsolutePath();
-            for (var i = 0; i < rootFiles.length; i++) {
-                if (path.indexOf(rootFiles[i]) !== -1) {
-                    // console.log("[Bypass] 拦截到 Root 文件检测: " + path);
-                    return false; // 欺骗应用，告诉它文件不存在
+            for (var i = 0; i < BLOCKED_PATHS.length; i++) {
+                if (path.toLowerCase().indexOf(BLOCKED_PATHS[i].toLowerCase()) !== -1) {
+                    return false; // 欺骗 APP：这个文件不存在
                 }
             }
             return this.exists();
         };
-
-        // Hook Runtime.exec() 拦截 shell 命令如 `su` 和 `which su`
-        Runtime.exec.overload('java.lang.String').implementation = function (command) {
-            if (command.indexOf("su") !== -1 || command.indexOf("which") !== -1 || command.indexOf("magisk") !== -1) {
-                // console.log("[Bypass] 拦截到命令执行: " + command);
-                command = "invalid_command"; // 替换为一个无效命令
+    
+        File.canExecute.implementation = function () {
+            var path = this.getAbsolutePath();
+            for (var i = 0; i < BLOCKED_PATHS.length; i++) {
+                if (path.toLowerCase().indexOf(BLOCKED_PATHS[i].toLowerCase()) !== -1) {
+                    return false;
+                }
             }
-            return this.exec.overload('java.lang.String').call(this, command);
+            return this.canExecute();
         };
-
-        Runtime.exec.overload('[Ljava.lang.String;').implementation = function (cmdarray) {
-            if (cmdarray.length > 0 && (cmdarray[0].indexOf("su") !== -1 || cmdarray[0].indexOf("which") !== -1)) {
-                // console.log("[Bypass] 拦截到命令执行数组: " + cmdarray[0]);
-                cmdarray[0] = "invalid_command";
+        
+        File.listFiles.overload().implementation = function () {
+            var result = this.listFiles();
+            if (!result) return result;
+            var filtered = result.filter(function(f) {
+                var name = f.getName().toLowerCase();
+                return name.indexOf('magisk') === -1 && name.indexOf('frida') === -1;
+            });
+            return filtered;
+        };
+        console.log("[防线1] ✅ 文件系统探测拦截器已部署");
+    } catch (e) {
+        console.log("[防线1] ⚠️ 文件系统拦截部署失败: " + e);
+    }
+    
+    // [防线2] Hook Runtime.exec —— 拦截 shell 命令执行检测 (which su / su -c id 等)
+    try {
+        var Runtime = Java.use("java.lang.Runtime");
+        var BLOCKED_COMMANDS = ["su", "which", "busybox", "magisk", "frida"];
+        
+        var blockCommand = function(cmd) {
+            if (typeof cmd === 'string') {
+                for (var i = 0; i < BLOCKED_COMMANDS.length; i++) {
+                    if (cmd.indexOf(BLOCKED_COMMANDS[i]) !== -1) {
+                        return true;
+                    }
+                }
             }
-            return this.exec.overload('[Ljava.lang.String;').call(this, cmdarray);
+            return false;
         };
-
-        // Hook PackageManager.getPackageInfo 拦截 Root 管理软件的包名检测
+    
+        Runtime.exec.overload('java.lang.String').implementation = function (cmd) {
+            if (blockCommand(cmd)) {
+                // 返回一个执行失败的假进程
+                return this.exec.overload('java.lang.String').call(this, "echo no_root");
+            }
+            return this.exec.overload('java.lang.String').call(this, cmd);
+        };
+    
+        Runtime.exec.overload('[Ljava.lang.String;').implementation = function (cmds) {
+            if (cmds && cmds.length > 0 && blockCommand(cmds[0])) {
+                return this.exec.overload('java.lang.String').call(this, "echo no_root");
+            }
+            return this.exec.overload('[Ljava.lang.String;').call(this, cmds);
+        };
+    
+        Runtime.exec.overload('[Ljava.lang.String;', '[Ljava.lang.String;', 'java.io.File').implementation = function (cmds, envp, dir) {
+            if (cmds && cmds.length > 0 && blockCommand(cmds[0])) {
+                return this.exec.overload('java.lang.String').call(this, "echo no_root");
+            }
+            return this.exec.overload('[Ljava.lang.String;', '[Ljava.lang.String;', 'java.io.File').call(this, cmds, envp, dir);
+        };
+        console.log("[防线2] ✅ Shell命令执行拦截器已部署");
+    } catch (e) {
+        console.log("[防线2] ⚠️ 命令拦截部署失败: " + e);
+    }
+    
+    // [防线3] Hook PackageManager —— 拦截对 Root 管理应用包名的枚举查询
+    try {
+        var PackageManager = Java.use("android.app.ApplicationPackageManager");
+        var ROOT_PACKAGES = [
+            "com.topjohnwu.magisk",     // Magisk
+            "eu.chainfire.supersu",      // SuperSU
+            "com.noshufou.android.su",   // Superuser
+            "com.noshufou.android.su.elite",
+            "com.koushikdutta.superuser",
+            "com.thirdparty.superuser",
+            "com.yellowes.su",
+            "com.kingouser.com",         // Kingo Root
+            "com.mgyun.shua",
+            "com.touchwiz.systemmanager",
+            "com.ubuntuone.android.files",
+            "com.keramidas.TitaniumBackup",
+            "re.frida.server",           // Frida Server
+        ];
+    
         PackageManager.getPackageInfo.overload('java.lang.String', 'int').implementation = function (pkgName, flags) {
-            var rootPackages = [
-                "com.noshufou.android.su",
-                "eu.chainfire.supersu",
-                "com.topjohnwu.magisk",
-                "com.koushikdutta.superuser"
-            ];
-            for (var i = 0; i < rootPackages.length; i++) {
-                if (pkgName == rootPackages[i]) {
-                    // console.log("[Bypass] 拦截到包名检测: " + pkgName);
-                    var NameNotFoundException = Java.use("android.content.pm.PackageManager$NameNotFoundException");
-                    throw NameNotFoundException.$new("Package not found");
+            for (var i = 0; i < ROOT_PACKAGES.length; i++) {
+                if (pkgName === ROOT_PACKAGES[i]) {
+                    var NotFoundException = Java.use("android.content.pm.PackageManager$NameNotFoundException").$new();
+                    throw NotFoundException;
                 }
             }
             return this.getPackageInfo(pkgName, flags);
         };
-
-        // 绕过 Build 属性检测 (如 test-keys 检测)
+        console.log("[防线3] ✅ Root应用包名枚举拦截器已部署");
+    } catch (e) {
+        console.log("[防线3] ⚠️ 包名枚举拦截部署失败: " + e);
+    }
+    
+    // [防线4] Hook Build 属性 —— 伪造系统签名类型，隐藏 test-keys 标识
+    try {
         var Build = Java.use("android.os.Build");
-        if (Build.TAGS.value.indexOf("test-keys") !== -1) {
+        if (Build.TAGS && Build.TAGS.value && Build.TAGS.value.indexOf("test-keys") !== -1) {
             Build.TAGS.value = "release-keys";
         }
-        console.log("[Hook] Root检测绕过逻辑加载完成。");
+        
+        // 部分 APP 检测 Build.FINGERPRINT 中的 "generic" 或 "unknown" 特征
+        if (Build.FINGERPRINT && Build.FINGERPRINT.value) {
+            var fp = Build.FINGERPRINT.value;
+            if (fp.indexOf("generic") !== -1 || fp.indexOf("unknown") !== -1) {
+                Build.FINGERPRINT.value = "google/walleye/walleye:8.1.0/OPM1.171019.011/4448085:user/release-keys";
+            }
+        }
+        console.log("[防线4] ✅ 系统Build属性伪装已部署");
     } catch (e) {
-        console.log("[Hook] Root检测绕过逻辑加载失败: " + e);
+        console.log("[防线4] ⚠️ Build属性伪装部署失败: " + e);
     }
-    // ==========================================
-
-
-    // 1. 设备标识符相关API
-    console.log("[Hook] 开始Hook设备标识符API...");
     
-    // TelephonyManager
+    // [防线5] Hook /proc/net/tcp 端口扫描 —— 阻止 APP 通过读取网络端口列表来发现 Frida Server (默认监听27042端口)
+    try {
+        var BufferedReader = Java.use("java.io.BufferedReader");
+        var FRIDA_PORT_HEX = "699A"; // 27042 的十六进制
+        
+        BufferedReader.readLine.implementation = function () {
+            var line = this.readLine();
+            // 过滤掉包含 Frida 默认端口特征的行
+            if (line !== null && line.indexOf(FRIDA_PORT_HEX) !== -1) {
+                return this.readLine(); // 跳过该行，继续读下一行
+            }
+            return line;
+        };
+        console.log("[防线5] ✅ Frida端口扫描反侦察已部署 (端口: 27042)");
+    } catch (e) {
+        console.log("[防线5] ⚠️ 端口扫描反侦察部署失败: " + e);
+    }
+    
+    // [防线6] Hook System.getProperty —— 拦截通过系统属性读取 root 信息
+    try {
+        var SystemClass = Java.use("java.lang.System");
+        SystemClass.getProperty.overload('java.lang.String').implementation = function (key) {
+            var value = this.getProperty(key);
+            if (key === "ro.debuggable" && value === "1") return "0";
+            if (key === "ro.secure" && value === "0") return "1";
+            if (key === "service.adb.root" && value === "1") return "0";
+            return value;
+        };
+        console.log("[防线6] ✅ 系统属性查询拦截器已部署");
+    } catch (e) {
+        console.log("[防线6] ⚠️ 系统属性拦截部署失败: " + e);
+    }
+    
+    console.log("\n[Hook] 反检测盾牌部署完毕！开始挂载敏感API捕获探针...\n");
+    
+    // ============================================================
+    // 第二优先级: 敏感 API 调用捕获探针
+    // ============================================================
+    
+    // 统一发送函数，防止栈溢出
+    function safeSend(apiName, args, retVal) {
+        try {
+            send({
+                api: apiName,
+                args: args || [],
+                return_value: retVal || ""
+            });
+        } catch(e) { /* 忽略发送失败 */ }
+    }
+    
+    // [探针A] 设备标识符 API
     try {
         var TelephonyManager = Java.use("android.telephony.TelephonyManager");
         
-        // getDeviceId
-        if (TelephonyManager.getDeviceId) {
-            TelephonyManager.getDeviceId.overload().implementation = function () {
-                send({
-                    api: "TelephonyManager.getDeviceId()",
-                    args: [],
-                    return_value: "FAKE_DEVICE_ID",
-                    stack: Java.use("android.util.Log").getStackTraceString(Java.use("java.lang.Exception").$new())
-                });
-                return "FAKE_DEVICE_ID";
-            };
-        }
+        TelephonyManager.getDeviceId.overload().implementation = function () {
+            var ret = "FAKEDEVICE0000000";
+            safeSend("TelephonyManager.getDeviceId()", [], ret);
+            return ret;
+        };
         
-        // getImei
         if (TelephonyManager.getImei) {
             TelephonyManager.getImei.overload().implementation = function () {
-                send({
-                    api: "TelephonyManager.getImei()",
-                    args: [],
-                    return_value: "FAKE_IMEI",
-                    stack: Java.use("android.util.Log").getStackTraceString(Java.use("java.lang.Exception").$new())
-                });
-                return "FAKE_IMEI";
+                var ret = "000000000000000";
+                safeSend("TelephonyManager.getImei()", [], ret);
+                return ret;
             };
         }
         
-        // getSubscriberId (IMSI)
-        if (TelephonyManager.getSubscriberId) {
-            TelephonyManager.getSubscriberId.overload().implementation = function () {
-                send({
-                    api: "TelephonyManager.getSubscriberId()",
-                    args: [],
-                    return_value: "FAKE_IMSI",
-                    stack: Java.use("android.util.Log").getStackTraceString(Java.use("java.lang.Exception").$new())
-                });
-                return "FAKE_IMSI";
-            };
-        }
+        TelephonyManager.getSubscriberId.overload().implementation = function () {
+            var ret = "FAKE_IMSI";
+            safeSend("TelephonyManager.getSubscriberId()", [], ret);
+            return ret;
+        };
         
-        // getSimSerialNumber
-        if (TelephonyManager.getSimSerialNumber) {
-            TelephonyManager.getSimSerialNumber.overload().implementation = function () {
-                send({
-                    api: "TelephonyManager.getSimSerialNumber()",
-                    args: [],
-                    return_value: "FAKE_SIM_SERIAL",
-                    stack: Java.use("android.util.Log").getStackTraceString(Java.use("java.lang.Exception").$new())
-                });
-                return "FAKE_SIM_SERIAL";
-            };
-        }
+        TelephonyManager.getSimSerialNumber.overload().implementation = function () {
+            var ret = "FAKE_SIM_SERIAL";
+            safeSend("TelephonyManager.getSimSerialNumber()", [], ret);
+            return ret;
+        };
+        
+        TelephonyManager.getLine1Number.overload().implementation = function () {
+            var ret = "FAKE_PHONE_NUMBER";
+            safeSend("TelephonyManager.getLine1Number()", [], ret);
+            return ret;
+        };
+        console.log("[探针A] ✅ 设备标识符探针挂载成功");
     } catch (e) {
-        console.log("[Hook] 无法Hook TelephonyManager: " + e);
+        console.log("[探针A] ⚠️ 设备标识符探针挂载失败: " + e);
     }
     
-    // Build类 (获取设备信息)
-    try {
-        var Build = Java.use("android.os.Build");
-        
-        // 修改设备信息属性
-        Object.getOwnPropertyNames(Build.class).forEach(function(name) {
-            if (name !== "$class" && name !== "$super" && typeof Build[name] === "string" && name !== "TAGS") {
-                Object.defineProperty(Build.class, name, {
-                    get: function() {
-                        send({
-                            api: "Build." + name,
-                            args: [],
-                            return_value: "FAKE_" + name.toUpperCase(),
-                            stack: Java.use("android.util.Log").getStackTraceString(Java.use("java.lang.Exception").$new())
-                        });
-                        return "FAKE_" + name.toUpperCase();
-                    }
-                });
-            }
-        });
-    } catch (e) {
-        console.log("[Hook] 无法Hook Build: " + e);
-    }
-    
-    // 2. 位置信息相关API
-    console.log("[Hook] 开始Hook位置信息API...");
-    
+    // [探针B] 位置信息 API
     try {
         var LocationManager = Java.use("android.location.LocationManager");
         
-        // requestLocationUpdates
-        var overloads = LocationManager.requestLocationUpdates.overloads;
-        overloads.forEach(function(overload) {
+        LocationManager.requestLocationUpdates.overloads.forEach(function(overload) {
             overload.implementation = function() {
-                var args = Array.from(arguments);
-                send({
-                    api: "LocationManager.requestLocationUpdates()",
-                    args: args.map(arg => String(arg)),
-                    return_value: "void",
-                    stack: Java.use("android.util.Log").getStackTraceString(Java.use("java.lang.Exception").$new())
-                });
+                safeSend("LocationManager.requestLocationUpdates()", [String(arguments[0])], "void");
                 return this.requestLocationUpdates.apply(this, arguments);
             };
         });
         
-        // getLastKnownLocation
         if (LocationManager.getLastKnownLocation) {
             LocationManager.getLastKnownLocation.overload("java.lang.String").implementation = function(provider) {
-                send({
-                    api: "LocationManager.getLastKnownLocation()",
-                    args: [provider],
-                    return_value: "null",
-                    stack: Java.use("android.util.Log").getStackTraceString(Java.use("java.lang.Exception").$new())
-                });
-                return null;
+                safeSend("LocationManager.getLastKnownLocation()", [provider], "null");
+                return this.getLastKnownLocation(provider);
             };
         }
+        console.log("[探针B] ✅ 位置信息探针挂载成功");
     } catch (e) {
-        console.log("[Hook] 无法Hook LocationManager: " + e);
+        console.log("[探针B] ⚠️ 位置信息探针挂载失败: " + e);
     }
     
-    // 3. 存储访问相关API
-    console.log("[Hook] 开始Hook存储访问API...");
-    
-    try {
-        var Context = Java.use("android.content.Context");
-        
-        // getExternalFilesDir
-        if (Context.getExternalFilesDir) {
-            Context.getExternalFilesDir.overload("java.lang.String").implementation = function(type) {
-                send({
-                    api: "Context.getExternalFilesDir()",
-                    args: [type],
-                    return_value: "FAKE_FILE_PATH",
-                    stack: Java.use("android.util.Log").getStackTraceString(Java.use("java.lang.Exception").$new())
-                });
-                return this.getExternalFilesDir(type);
-            };
-        }
-        
-        // getExternalStorageDirectory
-        var Environment = Java.use("android.os.Environment");
-        if (Environment.getExternalStorageDirectory) {
-            Environment.getExternalStorageDirectory.overload().implementation = function() {
-                send({
-                    api: "Environment.getExternalStorageDirectory()",
-                    args: [],
-                    return_value: "FAKE_STORAGE_DIR",
-                    stack: Java.use("android.util.Log").getStackTraceString(Java.use("java.lang.Exception").$new())
-                });
-                return this.getExternalStorageDirectory();
-            };
-        }
-    } catch (e) {
-        console.log("[Hook] 无法Hook存储API: " + e);
-    }
-    
-    // 4. 相机相关API
-    console.log("[Hook] 开始Hook相机API...");
-    
-    try {
-        var Camera = Java.use("android.hardware.Camera");
-        
-        // open
-        if (Camera.open) {
-            Camera.open.overload().implementation = function() {
-                send({
-                    api: "Camera.open()",
-                    args: [],
-                    return_value: "FAKE_CAMERA",
-                    stack: Java.use("android.util.Log").getStackTraceString(Java.use("java.lang.Exception").$new())
-                });
-                return this.open();
-            };
-        }
-        
-        // CameraManager (Android 5.0+)
-        var CameraManager = Java.use("android.hardware.camera2.CameraManager");
-        if (CameraManager.openCamera) {
-            CameraManager.openCamera.overload("java.lang.String", "android.hardware.camera2.CameraDevice$StateCallback", "android.os.Handler").implementation = function(cameraId, callback, handler) {
-                send({
-                    api: "CameraManager.openCamera()",
-                    args: [cameraId, "Callback", "Handler"],
-                    return_value: "void",
-                    stack: Java.use("android.util.Log").getStackTraceString(Java.use("java.lang.Exception").$new())
-                });
-                return this.openCamera(cameraId, callback, handler);
-            };
-        }
-    } catch (e) {
-        console.log("[Hook] 无法Hook相机API: " + e);
-    }
-    
-    // 5. 麦克风/音频录制相关API
-    console.log("[Hook] 开始Hook音频录制API...");
-    
-    try {
-        var MediaRecorder = Java.use("android.media.MediaRecorder");
-        
-        // start
-        if (MediaRecorder.start) {
-            MediaRecorder.start.overload().implementation = function() {
-                send({
-                    api: "MediaRecorder.start()",
-                    args: [],
-                    return_value: "void",
-                    stack: Java.use("android.util.Log").getStackTraceString(Java.use("java.lang.Exception").$new())
-                });
-                return this.start();
-            };
-        }
-        
-        // setAudioSource
-        if (MediaRecorder.setAudioSource) {
-            MediaRecorder.setAudioSource.overload("int").implementation = function(source) {
-                send({
-                    api: "MediaRecorder.setAudioSource()",
-                    args: [source],
-                    return_value: "void",
-                    stack: Java.use("android.util.Log").getStackTraceString(Java.use("java.lang.Exception").$new())
-                });
-                return this.setAudioSource(source);
-            };
-        }
-    } catch (e) {
-        console.log("[Hook] 无法Hook音频API: " + e);
-    }
-    
-    // 6. 联系人相关API
-    console.log("[Hook] 开始Hook联系人API...");
-    
+    // [探针C] 联系人/短信数据库查询 API
     try {
         var ContentResolver = Java.use("android.content.ContentResolver");
-        
-        // query
-        var queryOverloads = ContentResolver.query.overloads;
-        queryOverloads.forEach(function(overload) {
+        ContentResolver.query.overloads.forEach(function(overload) {
             overload.implementation = function() {
-                var args = Array.from(arguments);
-                // 检查是否查询联系人
-                if (args.length > 0 && String(args[0]).includes("contacts")) {
-                    send({
-                        api: "ContentResolver.query()",
-                        args: args.map(arg => String(arg)),
-                        return_value: "FAKE_CURSOR",
-                        stack: Java.use("android.util.Log").getStackTraceString(Java.use("java.lang.Exception").$new())
-                    });
+                var uri = String(arguments[0]);
+                if (uri.indexOf("contacts") !== -1 || uri.indexOf("sms") !== -1 || uri.indexOf("mms") !== -1 || uri.indexOf("call_log") !== -1) {
+                    safeSend("ContentResolver.query()", [uri], "Cursor");
                 }
                 return this.query.apply(this, arguments);
             };
         });
+        console.log("[探针C] ✅ 联系人/短信查询探针挂载成功");
     } catch (e) {
-        console.log("[Hook] 无法Hook联系人API: " + e);
+        console.log("[探针C] ⚠️ 联系人/短信查询探针挂载失败: " + e);
     }
     
-    // 7. 自定义权限相关API
-    console.log("[Hook] 开始Hook自定义权限API...");
-    
-    // Asus MSA (SupplementaryDID)
+    // [探针D] 相机 API
     try {
-        // 尝试Hook Asus MSA相关类
-        var AsusMSA = Java.use("com.asus.msa.SupplementaryDID");
-        if (AsusMSA) {
-            // Hook所有方法
-            var methods = AsusMSA.class.getDeclaredMethods();
-            methods.forEach(function(method) {
-                var methodName = method.getName();
-                if (AsusMSA[methodName]) {
-                    var overloads = AsusMSA[methodName].overloads;
-                    overloads.forEach(function(overload) {
-                        overload.implementation = function() {
-                            var args = Array.from(arguments);
-                            send({
-                                api: "com.asus.msa.SupplementaryDID." + methodName + "()",
-                                args: args.map(arg => String(arg)),
-                                return_value: "FAKE_VALUE",
-                                stack: Java.use("android.util.Log").getStackTraceString(Java.use("java.lang.Exception").$new())
-                            });
-                            return this[methodName].apply(this, arguments);
-                        };
-                    });
-                }
-            });
+        var Camera = Java.use("android.hardware.Camera");
+        if (Camera.open) {
+            Camera.open.overload().implementation = function() {
+                safeSend("Camera.open()", [], "Camera");
+                return this.open();
+            };
         }
+        
+        var CameraManager = Java.use("android.hardware.camera2.CameraManager");
+        if (CameraManager.openCamera) {
+            CameraManager.openCamera.overload("java.lang.String", "android.hardware.camera2.CameraDevice$StateCallback", "android.os.Handler").implementation = function(id, cb, handler) {
+                safeSend("CameraManager.openCamera()", [id], "void");
+                return this.openCamera(id, cb, handler);
+            };
+        }
+        console.log("[探针D] ✅ 相机访问探针挂载成功");
     } catch (e) {
-        console.log("[Hook] 无法Hook Asus MSA: " + e);
+        console.log("[探针D] ⚠️ 相机访问探针挂载失败: " + e);
     }
     
-    // 8. 网络相关API
-    console.log("[Hook] 开始Hook网络API...");
+    // [探针E] 录音 API
+    try {
+        var MediaRecorder = Java.use("android.media.MediaRecorder");
+        if (MediaRecorder.start) {
+            MediaRecorder.start.overload().implementation = function() {
+                safeSend("MediaRecorder.start()", [], "void");
+                return this.start();
+            };
+        }
+        if (MediaRecorder.setAudioSource) {
+            MediaRecorder.setAudioSource.overload("int").implementation = function(src) {
+                safeSend("MediaRecorder.setAudioSource()", [src], "void");
+                return this.setAudioSource(src);
+            };
+        }
+        
+        var AudioRecord = Java.use("android.media.AudioRecord");
+        if (AudioRecord.startRecording) {
+            AudioRecord.startRecording.overload().implementation = function() {
+                safeSend("AudioRecord.startRecording()", [], "void");
+                return this.startRecording();
+            };
+        }
+        console.log("[探针E] ✅ 录音API探针挂载成功");
+    } catch (e) {
+        console.log("[探针E] ⚠️ 录音探针挂载失败: " + e);
+    }
     
+    // [探针F] 存储访问 API
+    try {
+        var Environment = Java.use("android.os.Environment");
+        if (Environment.getExternalStorageDirectory) {
+            Environment.getExternalStorageDirectory.overload().implementation = function() {
+                safeSend("Environment.getExternalStorageDirectory()", [], "/sdcard");
+                return this.getExternalStorageDirectory();
+            };
+        }
+        console.log("[探针F] ✅ 外部存储探针挂载成功");
+    } catch (e) {
+        console.log("[探针F] ⚠️ 外部存储探针挂载失败: " + e);
+    }
+    
+    // [探针G] 网络通信 API
     try {
         var URL = Java.use("java.net.URL");
-        var HttpURLConnection = Java.use("java.net.HttpURLConnection");
-        
-        // URL.openConnection
-        if (URL.openConnection) {
-            URL.openConnection.overload().implementation = function() {
-                send({
-                    api: "URL.openConnection()",
-                    args: [],
-                    return_value: "FAKE_CONNECTION",
-                    stack: Java.use("android.util.Log").getStackTraceString(Java.use("java.lang.Exception").$new())
-                });
-                return this.openConnection();
-            };
-        }
-        
-        // HttpURLConnection.connect
-        if (HttpURLConnection.connect) {
-            HttpURLConnection.connect.overload().implementation = function() {
-                send({
-                    api: "HttpURLConnection.connect()",
-                    args: [],
-                    return_value: "void",
-                    stack: Java.use("android.util.Log").getStackTraceString(Java.use("java.lang.Exception").$new())
-                });
-                return this.connect();
-            };
-        }
+        URL.openConnection.overload().implementation = function() {
+            safeSend("URL.openConnection()", [this.toString()], "URLConnection");
+            return this.openConnection();
+        };
+        console.log("[探针G] ✅ 网络通信探针挂载成功");
     } catch (e) {
-        console.log("[Hook] 无法Hook网络API: " + e);
+        console.log("[探针G] ⚠️ 网络通信探针挂载失败: " + e);
     }
     
-    console.log("[Hook] 敏感API Hook初始化完成！");
+    // [探针H] 应用列表枚举 API（隐私合规的重要检测项）
+    try {
+        var PackageManagerH = Java.use("android.app.ApplicationPackageManager");
+        PackageManagerH.getInstalledApplications.overload('int').implementation = function(flags) {
+            safeSend("PackageManager.getInstalledApplications()", [flags], "List<ApplicationInfo>");
+            return this.getInstalledApplications(flags);
+        };
+        
+        PackageManagerH.getInstalledPackages.overload('int').implementation = function(flags) {
+            safeSend("PackageManager.getInstalledPackages()", [flags], "List<PackageInfo>");
+            return this.getInstalledPackages(flags);
+        };
+        console.log("[探针H] ✅ 应用列表枚举探针挂载成功");
+    } catch (e) {
+        console.log("[探针H] ⚠️ 应用列表探针挂载失败: " + e);
+    }
+    
+    // [探针I] 剪贴板 API（隐私数据窃取高危项）
+    try {
+        var ClipboardManager = Java.use("android.content.ClipboardManager");
+        ClipboardManager.getPrimaryClip.implementation = function() {
+            safeSend("ClipboardManager.getPrimaryClip()", [], "ClipData");
+            return this.getPrimaryClip();
+        };
+        console.log("[探针I] ✅ 剪贴板访问探针挂载成功");
+    } catch (e) {
+        console.log("[探针I] ⚠️ 剪贴板探针挂载失败: " + e);
+    }
+    
+    // [探针J] 账号信息 API
+    try {
+        var AccountManager = Java.use("android.accounts.AccountManager");
+        AccountManager.getAccounts.overload().implementation = function() {
+            safeSend("AccountManager.getAccounts()", [], "Account[]");
+            return this.getAccounts();
+        };
+        AccountManager.getAccountsByType.overload('java.lang.String').implementation = function(type) {
+            safeSend("AccountManager.getAccountsByType()", [type], "Account[]");
+            return this.getAccountsByType(type);
+        };
+        console.log("[探针J] ✅ 账号信息探针挂载成功");
+    } catch (e) {
+        console.log("[探针J] ⚠️ 账号信息探针挂载失败: " + e);
+    }
+    
+    console.log("\n========================================");
+    console.log("[Hook] ✅ 所有探针部署完成！系统进入监控状态...");
+    console.log("========================================\n");
 });

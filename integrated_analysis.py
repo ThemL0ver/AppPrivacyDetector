@@ -1,9 +1,11 @@
 #综合分析系统 - 静态和动态分析
 import json
 import os
+from datetime import datetime
 from typing import Dict, List, Optional
 from static_analysis.apk_analyzer import APKAnalyzer, APKBatchAnalyzer
 from dynamic_analysis.analyzer import DynamicAnalyzer, DynamicBatchAnalyzer
+from app_type_permissions import get_app_type, get_permission_category
 
 class IntegratedAnalyzer:
     def __init__(self, samples_dir: str, results_dir: str = "results"):
@@ -42,37 +44,86 @@ class IntegratedAnalyzer:
     
     def calculate_risk_score(self, static_result: Dict, dynamic_result: Optional[Dict] = None) -> Dict:
         # 基于静态分析计算风险评分
-        dangerous_perms = static_result['permission_analysis']['dangerous_permissions']
-        high_risk_perms = static_result['permission_analysis']['high_risk_permissions']
+        permission_analysis = static_result.get('permission_analysis', {})
+        permissions = permission_analysis.get('permissions', [])
+        package_name = static_result.get('package_name', '')
         
-        # 危险权限每个2分，高风险权限每个1分
-        static_score = len(dangerous_perms) * 2 + len(high_risk_perms) * 1
+        # 获取应用类型
+        app_type = get_app_type(package_name)
+        print(f"应用类型: {app_type}")
+        
+        # 权限风险等级权重
+        risk_weights = {
+            '极高': 5,
+            '高': 3,
+            '中高': 2,
+            '中': 1,
+            '低': 0.5
+        }
+        
+        # 计算静态评分
+        static_score = 0
+        necessary_permissions = []
+        non_necessary_permissions = []
+        
+        for perm in permissions:
+            permission_name = perm.get('name', '')
+            main_risk_level = perm.get('main_risk_level', '低')
+            
+            # 获取权限类别
+            permission_category = get_permission_category(app_type, permission_name)
+            print(f"权限: {permission_name}, 风险等级: {main_risk_level}, 类别: {permission_category}")
+            
+            # 只有非必要个人信息才计算风险分数
+            if permission_category != "必要个人信息":
+                weight = risk_weights.get(main_risk_level, 0.5)
+                static_score += weight
+                non_necessary_permissions.append({
+                    'name': permission_name,
+                    'risk_level': main_risk_level,
+                    'category': permission_category,
+                    'score': weight
+                })
+            else:
+                necessary_permissions.append({
+                    'name': permission_name,
+                    'risk_level': main_risk_level,
+                    'category': permission_category
+                })
         
         # 动态分析评分
         dynamic_score = 0
         if dynamic_result:
-            # 检测到的敏感API调用每个3分
+            # 检测到的敏感API调用
             sensitive_api_count = sum(len(calls) for calls in dynamic_result.get('sensitive_api_calls', {}).values())
-            dynamic_score = sensitive_api_count * 3
+            dynamic_score = sensitive_api_count * 4
             
-            # 网络流量异常每个2分
+            # 网络流量异常
             network_traffic_count = len(dynamic_result.get('network_traffic', []))
-            dynamic_score += network_traffic_count * 2
+            dynamic_score += network_traffic_count * 3
+            
+            # 隐私数据泄露
+            if dynamic_result.get('privacy_data_leaks'):
+                dynamic_score += 10
         
         total_score = static_score + dynamic_score
         
-        if total_score >= 15:
+        # 风险等级划分
+        if total_score >= 20:
             risk_level = 'high'
-        elif total_score >= 8:
+        elif total_score >= 10:
             risk_level = 'medium'
         else:
             risk_level = 'low'
         
         return {
-            'static_score': static_score,
-            'dynamic_score': dynamic_score,
-            'total_score': total_score,
-            'risk_level': risk_level
+            'static_score': round(static_score, 2),
+            'dynamic_score': round(dynamic_score, 2),
+            'total_score': round(total_score, 2),
+            'risk_level': risk_level,
+            'app_type': app_type,
+            'necessary_permissions': necessary_permissions,
+            'non_necessary_permissions': non_necessary_permissions
         }
     
     def generate_integrated_report(self, static_results: List[Dict], dynamic_results: List[Dict]) -> Dict:
@@ -102,7 +153,7 @@ class IntegratedAnalyzer:
             integrated_results.append(integrated_result)
         
         report = {
-            'analysis_date': None,
+            'analysis_date': datetime.now().isoformat(),
             'total_analyzed': len(integrated_results),
             'high_risk_apps': [r['apk_file'] for r in integrated_results 
                              if r['risk_assessment']['risk_level'] == 'high'],
@@ -139,12 +190,29 @@ class IntegratedAnalyzer:
         
         print("=" * 50)
     
-    def run_full_analysis(self):
+    def run_full_analysis(self, skip_dynamic=False, only_integrated=False):
         static_results = self.perform_static_analysis()
-        dynamic_results = self.perform_dynamic_analysis()
+        dynamic_results = []
+        if not skip_dynamic:
+            dynamic_results = self.perform_dynamic_analysis()
         report = self.generate_integrated_report(static_results, dynamic_results)
         
+        if only_integrated:
+            self._cleanup_results()
+        
         return report
+    
+    def _cleanup_results(self):
+        """删除除了integrated_analysis_report.json之外的所有结果文件"""
+        print("\n清理其他结果文件...")
+        for file_name in os.listdir(self.results_dir):
+            if file_name != 'integrated_analysis_report.json' and file_name.endswith('.json'):
+                file_path = os.path.join(self.results_dir, file_name)
+                try:
+                    os.remove(file_path)
+                    print(f"已删除: {file_name}")
+                except Exception as e:
+                    print(f"删除文件失败 {file_name}: {e}")
 
 if __name__ == "__main__":
     samples_dir = "samples"

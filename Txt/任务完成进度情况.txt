@@ -1,0 +1,167 @@
+# APP隐私权限检测与风险预警系统 - 任务进度完成情况文档
+
+## 一、已完成的任务内容
+
+### 1. 静态分析功能
+- ✅ APK权限提取：使用androguard解析APK文件，提取AndroidManifest.xml中的权限声明
+- ✅ 权限风险评估：基于`docs/apk系统权限与风险.xlsx`文件中的风险等级数据进行评估
+- ✅ 自定义权限风险检测：实现自动风险等级检测，支持厂商/应用自定义权限的风险评估
+- ✅ 权限分类：将权限分为低、中、中高、高、极高五个风险等级
+
+### 2. 动态分析功能  （已完成）
+- ✅ ADB设备连接：支持夜神模拟器连接，自动检测ADB路径
+- ✅ APK自动安装：实现APK文件的自动安装和卸载
+- ✅ 应用启动和交互模拟：模拟用户点击、滑动等操作
+- ✅ 敏感API调用监控：通过日志分析监控敏感API调用
+- ✅ Frida Hook动态行为监控：使用Frida技术捕获运行时敏感API实际调用
+- ✅ 包名自动获取：解决aapt工具缺失时无法获取包名的问题
+- ✅ ADB编码处理：修复Unicode解码错误导致的命令执行卡住问题
+- ✅ Frida连接优化：添加重试机制和PID附加功能
+- ✅ 端口配置：支持自定义ADB连接端口（62026）
+
+### 3. 可视化系统
+- ✅ Web dashboard：基于Flask和Chart.js的Web可视化界面
+- ✅ 风险分布图表：饼图展示不同风险等级的比例
+- ✅ 详细分析报告：展示应用权限、风险评估结果
+- ✅ 实时数据更新：基于最新分析结果展示数据
+
+### 4. 系统优化
+- ✅ 进度条显示：使用tqdm显示分析进度
+- ✅ 错误处理：增强的异常处理和错误提示
+- ✅ 跳过动态分析选项：添加`--skip-dynamic`参数，支持无设备时跳过动态分析
+- ✅ ADB连接优化：自动重启ADB服务，减少连接超时
+- ✅ 结果文件管理：添加`--only-integrated`参数，支持只保存综合分析报告
+
+## 二、系统架构
+
+### 核心模块
+1. **静态分析模块** (`static_analysis/`)
+   - `apk_analyzer.py`：APK权限提取和风险评估
+   - `__init__.py`：模块初始化
+
+2. **动态分析模块** (`dynamic_analysis/`)
+   - `analyzer.py`：基于ADB的动态分析
+   - `__init__.py`：模块初始化
+
+3. **Frida动态监控模块** (`dynamic_engine/`)
+   - `hook_manager.py`：Frida Hook管理
+   - `frida_analyzer.py`：Frida分析集成
+   - `hooks/sensitive_api_hook.js`：敏感API Hook脚本
+
+4. **综合分析模块** (`integrated_analysis.py`)
+   - 整合静态和动态分析结果
+   - 生成综合风险评估报告
+
+5. **Web可视化模块** (`web_dashboard/`)
+   - `app.py`：Flask Web服务器
+   - `templates/index.html`：前端界面
+
+## 三、运行指令
+
+### 1. 完整分析（包含动态分析）
+```bash
+# 确保夜神模拟器已启动
+python main.py
+```
+
+### 2. 仅静态分析（跳过动态分析）
+```bash
+python main.py --skip-dynamic
+```
+
+### 3. 只保存综合分析报告
+```bash
+# 运行分析并只保存integrated_analysis_report.json
+python main.py --only-integrated
+```
+
+### 4. 跳过动态分析并只保存综合分析报告
+```bash
+python main.py --skip-dynamic --only-integrated
+```
+
+### 5. 启动Web可视化系统
+```bash
+cd web_dashboard
+python app.py
+# 访问：http://localhost:5000
+```
+
+### 6. 单独运行Frida动态监控
+```bash
+python -m dynamic_engine.frida_analyzer <apk_path> <package_name>
+```
+
+## 四、分析结果输出
+
+### 分析报告文件
+- `results/integrated_analysis_report.json`：综合分析报告
+- `results/<apk_file>_analysis.json`：静态分析结果
+- `results/<apk_file>_dynamic_analysis.json`：动态分析结果
+- `results/<apk_file>_frida_hook.json`：Frida Hook分析结果
+
+### Web可视化界面
+- **分析摘要**：总体风险评估和应用数量
+- **应用列表**：展示所有分析的应用及其风险等级
+- **权限分析**：详细展示每个应用的权限使用情况
+- **风险分布**：通过饼图展示不同风险等级的比例
+- **动态分析结果**：包含敏感API调用监控数据
+
+## 五、后续更新说明
+
+1. **代码更新流程**
+   - 每次更新代码后，需重新运行分析命令生成最新报告
+   - Web可视化系统会自动加载最新的分析结果
+
+2. **文档更新要求**
+   - 每次代码更新后，需更新本任务进度完成情况文档
+   - 文档应包含：
+     - 新增功能或改进
+     - 修复的问题
+     - 运行指令的变化
+     - 系统架构的调整
+
+3. **测试建议**
+   - 每次更新后，建议运行完整分析流程验证系统稳定性
+   - 测试不同类型的APK文件，确保分析结果准确性
+
+## 六、技术依赖
+
+### 核心依赖
+- Python 3.10+
+- androguard：APK解析
+- pandas：Excel数据处理
+- Flask：Web服务器
+- Chart.js：数据可视化
+- Frida：动态行为监控
+
+### 外部工具
+- ADB：Android调试桥
+- 夜神模拟器：动态分析环境
+
+## 七、当前版本状态
+
+- **版本**：v1.1
+- **状态**：功能完整，稳定运行
+- **支持的分析类型**：
+  - 静态权限分析
+  - 动态行为监控
+  - Frida Hook分析
+  - 综合风险评估
+
+## 八、最近更新内容
+
+### 1. 功能改进
+- **包名自动获取**：实现从设备获取包名的功能，解决aapt工具缺失时无法获取包名的问题
+- **ADB编码处理**：修复Windows系统下Unicode解码错误导致的命令执行卡住问题
+- **Frida连接优化**：添加多重重试机制和PID附加功能，提高Frida Hook的成功率
+- **端口配置**：支持自定义ADB连接端口（默认62026），适配不同模拟器配置
+- **结果文件管理**：添加`--only-integrated`参数，支持只保存综合分析报告，删除其他结果文件
+
+### 2. 问题修复
+- 修复ADB命令执行时的编码错误
+- 修复Frida Hook启动失败的问题
+- 修复动态分析过程中的卡住问题
+- 增强系统的稳定性和可靠性
+
+系统已完全满足任务书中的所有要求，具备完整的APP隐私权限检测与风险预警能力。所有功能模块均已完成并经过测试，系统可以稳定运行。
