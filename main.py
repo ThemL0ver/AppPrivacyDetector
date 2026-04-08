@@ -7,6 +7,7 @@ def main():
     # 解析命令行参数
     parser = argparse.ArgumentParser(description='APP隐私权限检测与风险预警系统')
     parser.add_argument('--skip-dynamic', action='store_true', help='跳过动态分析')
+    parser.add_argument('--only-integrated', action='store_true', help='只保存综合分析报告，删除其他结果文件')
     args = parser.parse_args()
     
     print("=" * 60)
@@ -29,6 +30,17 @@ def main():
     
     print("\n开始执行完整分析流程...")
     report = analyzer.run_full_analysis()
+    
+    # 如果指定了--only-integrated参数，删除其他结果文件
+    if args.only_integrated:
+        print("\n清理其他结果文件，只保留综合分析报告...")
+        for file in os.listdir(results_dir):
+            if file != 'integrated_analysis_report.json':
+                file_path = os.path.join(results_dir, file)
+                if os.path.isfile(file_path):
+                    os.remove(file_path)
+                    print(f"删除文件: {file}")
+        print("清理完成！")
     
     print("\n" + "=" * 60)
     print("分析完成！")

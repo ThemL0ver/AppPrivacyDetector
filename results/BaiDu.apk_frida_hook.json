@@ -1,0 +1,16 @@
+{
+  "hooked_apis": [
+    ""
+  ],
+  "call_logs": [
+    {
+      "timestamp": 1774617954.0180001,
+      "api": "",
+      "args": [],
+      "return_value": "",
+      "stack": []
+    }
+  ],
+  "duration": 30.007785320281982,
+  "errors": []
+}

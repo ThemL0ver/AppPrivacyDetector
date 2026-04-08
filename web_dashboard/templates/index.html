@@ -232,6 +232,14 @@
         }
 
         // 工具函数
+        
+
+        function normalizeScore(value) {
+            const n = Number(value);
+            if (!Number.isFinite(n)) return 0;
+            return Math.round(n);
+        }
+
         function translateRisk(risk) {
             const map = { 'high': '高危', 'medium': '中危', 'low': '低危' };
             return map[risk] || risk;
@@ -242,7 +250,7 @@
                 case '低': case 'low': return 'success';
                 case '中': case 'medium': return 'warning text-dark';
                 case '中高': return 'warning text-dark';
-                case '高': case '极高': case 'high': return 'danger';
+                case '高': case '极高': case 'high': case 'very_high': return 'danger';
                 default: return 'secondary';
             }
         }
@@ -268,6 +276,11 @@
                 document.getElementById('high-risk').textContent = data.high_risk || 0;
                 document.getElementById('medium-risk').textContent = data.medium_risk || 0;
                 document.getElementById('low-risk').textContent = data.low_risk || 0;
+                updateRiskChart({
+                    high_risk: data.high_risk || 0,
+                    medium_risk: data.medium_risk || 0,
+                    low_risk: data.low_risk || 0
+                });
             }
         }
         
@@ -276,12 +289,6 @@
             const data = await response.json();
             
             const riskStats = data.risk_stats || { high: 0, medium: 0, low: 0, very_high: 0 };
-            const riskData = {
-                high_risk: (riskStats.high || 0) + (riskStats.very_high || 0),
-                medium_risk: riskStats.medium || 0,
-                low_risk: riskStats.low || 0
-            };
-            updateRiskChart(riskData);
             updatePermissionRiskChart(riskStats);
             updateHighRiskPermissions(data.permission_details || []);
         }
@@ -305,6 +312,8 @@
             apps.forEach(app => {
                 const row = document.createElement('tr');
                 const cnRisk = translateRisk(app.risk_level);
+                const riskScore = normalizeScore(app.risk_score);
+                app.risk_score = riskScore;
                 row.innerHTML = `
                     <td><strong>${app.apk_file || '未知'}</strong></td>
                     <td><span class="text-muted font-monospace" style="font-size: 0.85em">${app.package_name || '未知'}</span></td>
@@ -332,7 +341,7 @@
 
             apps.forEach(app => {
                 // 计算健康分: 满分100，根据risk_score扣分。假设最恶劣达到100分。
-                let score = Math.max(0, 100 - (app.risk_score || 0));
+                let score = Math.max(0, 100 - normalizeScore(app.risk_score));
                 let healthClass = 'circle-success';
                 let healthText = '健康合规';
                 let textClass = 'text-success';
@@ -418,16 +427,20 @@
         function updateHighRiskPermissions(permissions) {
             const tbody = document.getElementById('high-risk-permissions');
             tbody.innerHTML = '';
-            const highRiskPerms = permissions.filter(p => p && (p.main_risk_level === '中高' || p.main_risk_level === '高' || p.main_risk_level === '极高'));
+            const highRiskPerms = permissions.filter(p => {
+                const level = p?.main_risk_level || p?.risk_level || '';
+                return level === '中高' || level === '高' || level === '极高' || level === 'high' || level === 'very_high';
+            });
             if (highRiskPerms.length === 0) {
                 tbody.innerHTML = '<tr><td colspan="2" class="text-center text-muted">本网暂未发现极高危特征</td></tr>';
                 return;
             }
             highRiskPerms.forEach(perm => {
+                const levelText = (perm.risk_level || perm.main_risk_level || '未知').split('（')[0];
                 const row = document.createElement('tr');
                 row.innerHTML = `
                     <td class="font-monospace text-truncate" style="max-width:200px; font-size: 0.85em;" title="${perm.name}">${(perm.name||'').split('.').pop()}</td>
-                    <td><span class="badge bg-${getRiskBadgeClass(perm.main_risk_level)} shadow-sm">${perm.risk_level.split('（')[0]}</span></td>
+                    <td><span class="badge bg-${getRiskBadgeClass(perm.main_risk_level || perm.risk_level)} shadow-sm">${levelText}</span></td>
                 `;
                 tbody.appendChild(row);
             });
@@ -505,7 +518,7 @@
                 }
                 
                 const cnRisk = translateRisk(app.risk_assessment?.risk_level);
-                const score = app.risk_assessment?.total_score || 0;
+                const score = normalizeScore(app.risk_assessment?.total_score);
 
                 content.innerHTML = `
                     <div class="row g-4">
@@ -574,6 +587,9 @@
             }
             const app = detailCacheApp;
             const dyn = detailCacheDyn;
+            if (app.risk_assessment) {
+                app.risk_assessment.total_score = normalizeScore(app.risk_assessment.total_score);
+            }
             
             const reportWindow = window.open('', '_blank');
             
