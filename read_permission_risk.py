@@ -1,27 +1,22 @@
-import pandas as pd
+from pathlib import Path
 
-# 读取Excel文件
-excel_path = 'docs/apk系统权限与风险.xlsx'
+from static_analysis.permission_knowledge import PermissionKnowledgeBase
 
-try:
-    df = pd.read_excel(excel_path)
-    print("Excel文件读取成功！")
-    print(f"文件形状: {df.shape}")
-    print("\n列名:")
-    print(df.columns.tolist())
-    print("\n前10行数据:")
-    print(df.head(10))
-    
-    # 检查权限和风险等级列
-    if '权限名' in df.columns and '风险等级' in df.columns:
-        print("\n权限风险等级对应关系:")
-        for _, row in df.iterrows():
-            permission = row['权限名']
-            risk_level = row['风险等级']
-            if pd.notna(risk_level):
-                print(f"{permission}: {risk_level}")
-    else:
-        print("\n未找到'权限名'或'风险等级'列")
-        
-except Exception as e:
-    print(f"读取Excel文件失败: {e}")
+
+def main() -> None:
+    docs_dir = Path(__file__).resolve().parent / "docs"
+    knowledge = PermissionKnowledgeBase.from_csv(docs_dir / "apk系统权限与风险.csv")
+
+    print(f"权限知识库条目数: {len(knowledge.rows)}")
+    print("字段:")
+    print("  " + ", ".join(knowledge.rows[0].keys()))
+    print("\n前 10 条权限规则:")
+    for index, entry in enumerate(knowledge.rows[:10], start=1):
+        print(
+            f"{index:02d}. {entry['权限名']} -> {entry['风险等级']} / "
+            f"{entry['权限中文名']} / {entry['Android保护级别']}"
+        )
+
+
+if __name__ == "__main__":
+    main()

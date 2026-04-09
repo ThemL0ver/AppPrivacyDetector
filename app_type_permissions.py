@@ -696,7 +696,7 @@ SENSITIVE_API_WEIGHTS = {
 
 # 风险等级阈值
 RISK_THRESHOLDS = {
-    'high': 50,
-    'medium': 30,
+    'high': 55,
+    'medium': 35,
     'low': 0
 }

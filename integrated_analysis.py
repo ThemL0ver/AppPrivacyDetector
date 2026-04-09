@@ -51,6 +51,25 @@ class IntegratedAnalyzer:
         "getAccount": 1.7,
     }
 
+    SDK_CATEGORY_WEIGHTS = {
+        "ad": 2.2,
+        "analytics": 1.6,
+        "social": 1.0,
+        "payment": 0.8,
+        "map": 0.8,
+        "push": 0.3,
+    }
+
+    SDK_RISK_HINT_WEIGHTS = {
+        "low": 0.2,
+        "medium": 0.8,
+        "中": 0.8,
+        "medium_high": 1.2,
+        "中高": 1.2,
+        "high": 1.6,
+        "高": 1.6,
+    }
+
     INFRASTRUCTURE_PATTERNS = (
         "internet",
         "access_network_state",
@@ -333,6 +352,49 @@ class IntegratedAnalyzer:
             },
         }
 
+    def _score_static_context(
+        self,
+        static_result: Dict[str, Any],
+        permission_analysis: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        sdk_score = 0.0
+        for sdk in static_result.get("third_party_sdks", []) or []:
+            category = str(sdk.get("category", "")).strip().lower()
+            risk_hint = str(sdk.get("risk_hint", "")).strip()
+            sdk_score += max(
+                self.SDK_CATEGORY_WEIGHTS.get(category, 0.6),
+                self.SDK_RISK_HINT_WEIGHTS.get(risk_hint, 0.0),
+            )
+        sdk_score = round(min(sdk_score, 6.0), 2)
+
+        queries = static_result.get("queries", {}) or {}
+        query_count = (
+            len(queries.get("packages", []) or [])
+            + len(queries.get("providers", []) or [])
+            + len(queries.get("intents", []) or [])
+        )
+        query_score = round(min(query_count * 0.4, 3.0), 2)
+
+        custom_sensitive_permissions = {
+            item.get("name")
+            for item in permission_analysis.get("permission_details", [])
+            if item.get("is_custom") and item.get("main_risk_level") in {"中高", "高", "极高"}
+        }
+        custom_permission_score = round(min(len(custom_sensitive_permissions) * 0.7, 3.0), 2)
+
+        context_score = self._to_int_score(min(10.0, sdk_score + query_score + custom_permission_score))
+        return {
+            "score": context_score,
+            "sdk_count": len(static_result.get("third_party_sdks", []) or []),
+            "query_count": query_count,
+            "custom_sensitive_permission_count": len(custom_sensitive_permissions),
+            "breakdown": {
+                "sdk_score": self._to_int_score(sdk_score),
+                "query_score": self._to_int_score(query_score),
+                "custom_permission_score": self._to_int_score(custom_permission_score),
+            },
+        }
+
     def _get_dynamic_signal_count(self, payload: Any) -> int:
         if isinstance(payload, dict):
             if isinstance(payload.get("count"), int):
@@ -409,10 +471,14 @@ class IntegratedAnalyzer:
         permission_analysis = static_result.get("permission_analysis", {})
         permission_details = permission_analysis.get("permission_details", [])
 
-        static_assessment = self._score_static_permissions(app_type, permission_details)
+        static_permission_assessment = self._score_static_permissions(app_type, permission_details)
+        static_context_assessment = self._score_static_context(static_result, permission_analysis)
         dynamic_assessment = self._score_dynamic_behavior(dynamic_result)
 
-        total_score = self._to_int_score(min(100.0, static_assessment["score"] + dynamic_assessment["score"]))
+        static_score = self._to_int_score(
+            min(85.0, static_permission_assessment["score"] + static_context_assessment["score"])
+        )
+        total_score = self._to_int_score(min(100.0, static_score + dynamic_assessment["score"]))
 
         if total_score >= RISK_THRESHOLDS["high"]:
             risk_level = "high"
@@ -425,26 +491,34 @@ class IntegratedAnalyzer:
             "app_type": app_type,
             "risk_level": risk_level,
             "risk_label": self._derive_risk_label(risk_level),
-            "static_score": static_assessment["score"],
+            "static_score": static_score,
             "dynamic_score": dynamic_assessment["score"],
             "total_score": total_score,
-            "necessary_permissions": static_assessment["necessary_permissions"],
-            "contextual_permissions": static_assessment["contextual_permissions"],
-            "non_necessary_permissions": static_assessment["non_necessary_permissions"],
-            "contextual_permission_details": static_assessment["contextual_permission_details"],
-            "non_necessary_permission_details": static_assessment["non_necessary_permission_details"],
-            "necessary_count": static_assessment["necessary_count"],
-            "contextual_count": static_assessment["contextual_count"],
-            "non_necessary_count": static_assessment["non_necessary_count"],
-            "contextual_domains": static_assessment["contextual_domains"],
-            "excess_domains": static_assessment["excess_domains"],
-            "hard_violation_count": static_assessment["hard_violation_count"],
+            "necessary_permissions": static_permission_assessment["necessary_permissions"],
+            "contextual_permissions": static_permission_assessment["contextual_permissions"],
+            "non_necessary_permissions": static_permission_assessment["non_necessary_permissions"],
+            "contextual_permission_details": static_permission_assessment["contextual_permission_details"],
+            "non_necessary_permission_details": static_permission_assessment["non_necessary_permission_details"],
+            "necessary_count": static_permission_assessment["necessary_count"],
+            "contextual_count": static_permission_assessment["contextual_count"],
+            "non_necessary_count": static_permission_assessment["non_necessary_count"],
+            "contextual_domains": static_permission_assessment["contextual_domains"],
+            "excess_domains": static_permission_assessment["excess_domains"],
+            "hard_violation_count": static_permission_assessment["hard_violation_count"],
+            "third_party_sdk_count": static_context_assessment["sdk_count"],
+            "query_surface_count": static_context_assessment["query_count"],
+            "custom_sensitive_permission_count": static_context_assessment["custom_sensitive_permission_count"],
             "dynamic_api_signals": dynamic_assessment["api_signals"],
             "network_traffic_count": dynamic_assessment["network_traffic_count"],
             "privacy_leak_count": dynamic_assessment["privacy_leak_count"],
             "risk_thresholds": RISK_THRESHOLDS,
             "score_breakdown": {
-                "static": static_assessment["breakdown"],
+                "static": {
+                    "permission_model_score": static_permission_assessment["score"],
+                    "context_score": static_context_assessment["score"],
+                    **static_permission_assessment["breakdown"],
+                    **static_context_assessment["breakdown"],
+                },
                 "dynamic": dynamic_assessment["breakdown"],
             },
         }
@@ -495,7 +569,7 @@ class IntegratedAnalyzer:
 
         report = {
             "analysis_date": datetime.now().isoformat(timespec="seconds"),
-            "scoring_model": "context-aware-v2",
+            "scoring_model": "context-aware-v3",
             "total_analyzed": total_analyzed,
             "high_risk_apps": [item["apk_file"] for item in integrated_results if item["risk_assessment"]["risk_level"] == "high"],
             "medium_risk_apps": [item["apk_file"] for item in integrated_results if item["risk_assessment"]["risk_level"] == "medium"],
@@ -543,9 +617,9 @@ class IntegratedAnalyzer:
         print(f"  总分: {avg_scores.get('total_score', 0)}")
         print("=" * 50)
 
-    def run_full_analysis(self):
+    def run_full_analysis(self, skip_dynamic: bool = False):
         static_results = self.perform_static_analysis()
-        dynamic_results = self.perform_dynamic_analysis()
+        dynamic_results = [] if skip_dynamic else self.perform_dynamic_analysis()
         return self.generate_integrated_report(static_results, dynamic_results)
 
 
