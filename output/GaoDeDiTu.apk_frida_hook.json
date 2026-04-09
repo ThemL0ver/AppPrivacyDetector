@@ -1,0 +1,12 @@
+{
+  "hooked_apis": [],
+  "call_logs": [],
+  "duration": 30.003,
+  "errors": [
+    "ReferenceError: 'Java' is not defined\n    at <anonymous> (/script1.js:4)\n    at apply (native)\n    at <anonymous> (/frida/runtime/core.js:55)"
+  ],
+  "signal_counts": {},
+  "category_counts": {},
+  "aggregated_calls": [],
+  "status_messages": []
+}

@@ -255,6 +255,152 @@
             }
         }
 
+        function escapeHtml(value) {
+            return String(value ?? '')
+                .replace(/&/g, '&amp;')
+                .replace(/</g, '&lt;')
+                .replace(/>/g, '&gt;')
+                .replace(/"/g, '&quot;')
+                .replace(/'/g, '&#39;');
+        }
+
+        function truncateText(value, maxLength) {
+            const text = String(value ?? '');
+            if (text.length <= maxLength) {
+                return text;
+            }
+            return `${text.slice(0, maxLength)}...`;
+        }
+
+        function getPermissionLevel(permission) {
+            return String(permission?.main_risk_level || permission?.risk_level || '').trim();
+        }
+
+        function getPrivacyAttribute(permission) {
+            return String(permission?.privacy_attribute || '').trim();
+        }
+
+        function isLowRiskPrivacyPermission(permission) {
+            const level = getPermissionLevel(permission);
+            const privacyAttr = getPrivacyAttribute(permission);
+            return level === '低' && (permission?.is_privacy_related || (privacyAttr && privacyAttr !== '非隐私'));
+        }
+
+        function buildPermissionTableRows(permissions, emptyText, levelColor) {
+            if (!permissions || permissions.length === 0) {
+                return `<tr><td colspan="5" style="text-align:center;">${escapeHtml(emptyText)}</td></tr>`;
+            }
+            return permissions.map((permission, index) => {
+                const displayName = permission?.display_name || '';
+                const dimension = permission?.risk_dimension || '-';
+                const level = getPermissionLevel(permission) || '-';
+                return `
+                    <tr>
+                        <td>${index + 1}</td>
+                        <td>${escapeHtml(permission?.name || '-')}</td>
+                        <td>${escapeHtml(displayName || '-')}</td>
+                        <td>${escapeHtml(dimension)}</td>
+                        <td style="color:${levelColor}; font-weight:bold;">${escapeHtml(level)}</td>
+                    </tr>
+                `;
+            }).join('');
+        }
+
+        function getFridaAggregatedCalls(dynamicAnalysis) {
+            const frida = dynamicAnalysis?.frida_analysis;
+            const summary = frida?.summary || {};
+            if (Array.isArray(summary.aggregated_calls) && summary.aggregated_calls.length > 0) {
+                return summary.aggregated_calls;
+            }
+
+            const callLogs = frida?.results?.call_logs || [];
+            const grouped = {};
+            callLogs.forEach(log => {
+                const key = log?.signal_key || log?.api || 'unknown';
+                if (!grouped[key]) {
+                    grouped[key] = {
+                        signal_key: key,
+                        category: log?.category || 'other',
+                        description: log?.description || key,
+                        count: 0,
+                        sample_apis: []
+                    };
+                }
+                grouped[key].count += 1;
+                if (log?.api && !grouped[key].sample_apis.includes(log.api)) {
+                    grouped[key].sample_apis.push(log.api);
+                }
+            });
+            const fromCallLogs = Object.values(grouped).sort((a, b) => (b.count || 0) - (a.count || 0));
+            if (fromCallLogs.length > 0) {
+                return fromCallLogs;
+            }
+
+            const sensitiveApiCalls = dynamicAnalysis?.sensitive_api_calls || {};
+            return Object.entries(sensitiveApiCalls).map(([signalKey, payload]) => ({
+                signal_key: signalKey,
+                category: 'runtime_probe',
+                description: payload?.description || signalKey,
+                count: payload?.count || 0,
+                sample_apis: Array.isArray(payload?.logs) ? payload.logs.slice(0, 4) : []
+            })).sort((a, b) => (b.count || 0) - (a.count || 0));
+        }
+
+        function buildFridaTableRows(dynamicAnalysis) {
+            const aggregatedCalls = getFridaAggregatedCalls(dynamicAnalysis);
+            if (!aggregatedCalls.length) {
+                return '<tr><td colspan="5" style="text-align:center;">未捕获到可结构化展示的敏感 API 调用</td></tr>';
+            }
+
+            return aggregatedCalls.map((item, index) => {
+                const sampleApis = Array.isArray(item?.sample_apis) && item.sample_apis.length
+                    ? item.sample_apis.slice(0, 4).map(api => escapeHtml(api)).join('<br/>')
+                    : escapeHtml(item?.api || item?.signal_key || '-');
+                return `
+                    <tr>
+                        <td>${index + 1}</td>
+                        <td>${escapeHtml(item?.description || item?.signal_key || '-')}</td>
+                        <td>${escapeHtml(item?.category || '-')}</td>
+                        <td>${sampleApis}</td>
+                        <td>${normalizeScore(item?.count || 0)}</td>
+                    </tr>
+                `;
+            }).join('');
+        }
+
+        function getFridaCallLogs(dynamicAnalysis) {
+            const frida = dynamicAnalysis?.frida_analysis;
+            const results = frida?.results || {};
+            return Array.isArray(results.call_logs) ? results.call_logs : [];
+        }
+
+        function buildFridaLogRows(dynamicAnalysis) {
+            const callLogs = getFridaCallLogs(dynamicAnalysis).slice(0, 15);
+            if (!callLogs.length) {
+                return '<tr><td colspan="6" style="text-align:center;">未捕获到原始调用明细</td></tr>';
+            }
+
+            return callLogs.map((log, index) => {
+                const timestamp = log?.timestamp
+                    ? new Date((log.timestamp > 1e12 ? log.timestamp : log.timestamp * 1000)).toLocaleString('zh-CN', { hour12: false })
+                    : '-';
+                const apiName = log?.api || log?.signal_key || '-';
+                const category = log?.category || '-';
+                const argsText = Array.isArray(log?.args) ? log.args.join('; ') : (log?.args ? String(log.args) : '-');
+                const returnText = log?.return_value ?? '-';
+                return `
+                    <tr>
+                        <td>${index + 1}</td>
+                        <td>${escapeHtml(timestamp)}</td>
+                        <td>${escapeHtml(apiName)}</td>
+                        <td>${escapeHtml(category)}</td>
+                        <td title="${escapeHtml(argsText)}">${escapeHtml(truncateText(argsText, 120))}</td>
+                        <td title="${escapeHtml(String(returnText))}">${escapeHtml(truncateText(returnText, 120))}</td>
+                    </tr>
+                `;
+            }).join('');
+        }
+
         // 重新加载数据缓存
         async function reloadData() {
             try {
@@ -592,30 +738,67 @@
             }
             
             const reportWindow = window.open('', '_blank');
-            
-            // 构建高危权限表格
-            let highRiskRows = '';
-            if (app.static_analysis?.permission_analysis?.permission_details) {
-                const perms = app.static_analysis.permission_analysis.permission_details.filter(p => p.main_risk_level.includes('高'));
-                perms.forEach((p, i) => {
-                    highRiskRows += `<tr><td>${i+1}</td><td>${p.name}</td><td style="color:red; font-weight:bold;">${p.risk_level}</td></tr>`;
-                });
-                if(perms.length === 0) highRiskRows = `<tr><td colspan="3" style="text-align:center;">本次检材未发现极高危权限</td></tr>`;
+            if (!reportWindow) {
+                alert("浏览器阻止了新窗口，请允许弹窗后重试。");
+                return;
             }
+            
+            const permissionDetails = app.static_analysis?.permission_analysis?.permission_details || [];
+            const highRiskPermissions = permissionDetails.filter(permission => {
+                const level = getPermissionLevel(permission);
+                return level === '高' || level === '中高' || level === '极高';
+            });
+            const lowRiskPrivacyPermissions = permissionDetails.filter(isLowRiskPrivacyPermission);
+            const highRiskRows = buildPermissionTableRows(
+                highRiskPermissions,
+                '本次检材未发现高危敏感权限',
+                '#d32f2f'
+            );
+            const lowRiskPrivacyRows = buildPermissionTableRows(
+                lowRiskPrivacyPermissions,
+                '本次检材未发现低风险隐私权限',
+                '#2e7d32'
+            );
 
-            // 构建网络嗅探记录
             let networkStr = '未捕获到异常外联数据。';
             if (dyn && dyn.network_traffic && dyn.network_traffic.length > 0) {
-                networkStr = dyn.network_traffic.join('<br/>');
+                networkStr = dyn.network_traffic.map(item => escapeHtml(item)).join('<br/>');
             }
 
-            // Frida 探针状态
-            let fridaStr = '探针未生效或未配置注入。';
-            if (dyn && dyn.frida_analysis && !dyn.frida_analysis.error) {
-                fridaStr = `拦截到敏感越权调用 <b>${dyn.frida_analysis.summary?.total_api_calls||0}</b> 次，涵盖 <b>${dyn.frida_analysis.summary?.total_hooked_apis||0}</b> 个敏感API类。`;
-            } else if (dyn && dyn.frida_analysis && dyn.frida_analysis.error) {
-                fridaStr = `探针注入遭遇应用对抗防御，错误日志：${dyn.frida_analysis.error}`;
+            const fridaSummary = dyn?.frida_analysis?.summary || {};
+            let fridaHeadline = '探针未生效或未配置注入。';
+            if (dyn?.frida_analysis?.error) {
+                fridaHeadline = `探针注入遭遇应用对抗防御，错误日志：${escapeHtml(dyn.frida_analysis.error)}`;
+            } else if (Object.keys(fridaSummary).length > 0) {
+                fridaHeadline = `拦截到敏感调用 <b>${normalizeScore(fridaSummary.total_api_calls || 0)}</b> 次，归并为 <b>${normalizeScore(fridaSummary.total_hooked_signals || fridaSummary.total_hooked_apis || 0)}</b> 类信号。`;
             }
+            const fridaRows = buildFridaTableRows(dyn);
+            const fridaLogRows = buildFridaLogRows(dyn);
+
+            const thirdPartySdks = app.static_analysis?.third_party_sdks || [];
+            const appFrameworks = app.static_analysis?.app_frameworks || [];
+            const sdkRows = thirdPartySdks.length
+                ? thirdPartySdks.map((sdk, index) => `
+                    <tr>
+                        <td>${index + 1}</td>
+                        <td>${escapeHtml(sdk?.name || '-')}</td>
+                        <td>${escapeHtml(sdk?.category || '-')}</td>
+                        <td>${escapeHtml(sdk?.risk_hint || '-')}</td>
+                        <td>${escapeHtml(sdk?.description || '-')}</td>
+                        <td>${Array.isArray(sdk?.evidence) && sdk.evidence.length ? sdk.evidence.slice(0, 4).map(item => escapeHtml(item)).join('<br/>') : '-'}</td>
+                    </tr>
+                `).join('')
+                : '<tr><td colspan="6" style="text-align:center;">未识别到第三方 SDK 信息</td></tr>';
+            const frameworkRows = appFrameworks.length
+                ? appFrameworks.map((framework, index) => `
+                    <tr>
+                        <td>${index + 1}</td>
+                        <td>${escapeHtml(framework?.name || '-')}</td>
+                        <td>${escapeHtml(framework?.description || '-')}</td>
+                        <td>${Array.isArray(framework?.evidence) && framework.evidence.length ? framework.evidence.slice(0, 4).map(item => escapeHtml(item)).join('<br/>') : '-'}</td>
+                    </tr>
+                `).join('')
+                : '<tr><td colspan="4" style="text-align:center;">未识别到框架信息</td></tr>';
 
             const htmlContent = `
                 <!DOCTYPE html>
@@ -634,6 +817,7 @@
                         th, td { border: 1px solid #000; padding: 10px; text-align: left; }
                         th { background-color: #eee; font-weight: bold; }
                         .danger { color: #d32f2f; font-weight: bold; }
+                        .safe { color: #2e7d32; font-weight: bold; }
                         .code-block { font-family: monospace; background: #f4f4f4; padding: 15px; border: 1px solid #ddd; white-space: pre-wrap; font-size: 12px; line-height: 1.5; word-break: break-all;}
                         .footer { margin-top: 60px; text-align: right; font-size: 14px; }
                         .seal { margin-top: 20px; height: 100px; text-align: right; padding-right: 50px; }
@@ -655,17 +839,48 @@
                     </div>
 
                     <h2>一、 静态拆包与敏感权限声明分析</h2>
-                    <p>经脱壳及清单解析，发现该程序共声明系统权限 <b>${app.static_analysis?.total_permissions || 0}</b> 项，其中涉及窃取或越界收集隐私的高危项目如下：</p>
+                    <p>经脱壳及清单解析，发现该程序共声明系统权限 <b>${app.static_analysis?.total_permissions || 0}</b> 项，其中危害评级为高、中高、极高的敏感权限如下：</p>
                     <table>
                         <thead>
-                            <tr><th width="10%">序号</th><th width="60%">越权标识 (Permission Name)</th><th width="30%">危害评级</th></tr>
+                            <tr><th width="8%">序号</th><th width="38%">越权标识 (Permission Name)</th><th width="22%">权限中文名</th><th width="17%">风险维度</th><th width="15%">危害评级</th></tr>
                         </thead>
                         <tbody>
                             ${highRiskRows}
                         </tbody>
                     </table>
 
-                    <h2>二、 动态沙箱行为取证</h2>
+                    <p>同时，系统识别出以下风险等级较低但仍涉及隐私处理的权限，用于辅助判断应用的个人信息处理边界：</p>
+                    <table>
+                        <thead>
+                            <tr><th width="8%">序号</th><th width="38%">权限标识</th><th width="22%">权限中文名</th><th width="17%">风险维度</th><th width="15%">危害评级</th></tr>
+                        </thead>
+                        <tbody>
+                            ${lowRiskPrivacyRows}
+                        </tbody>
+                    </table>
+
+                    <h2>二、 静态依赖与运行框架识别</h2>
+                    <h3>1. 第三方 SDK 信息</h3>
+                    <table>
+                        <thead>
+                            <tr><th width="7%">序号</th><th width="18%">SDK 名称</th><th width="12%">类别</th><th width="10%">风险提示</th><th width="18%">说明</th><th width="35%">识别证据</th></tr>
+                        </thead>
+                        <tbody>
+                            ${sdkRows}
+                        </tbody>
+                    </table>
+
+                    <h3>2. 框架信息</h3>
+                    <table>
+                        <thead>
+                            <tr><th width="7%">序号</th><th width="22%">框架名称</th><th width="26%">说明</th><th width="45%">识别证据</th></tr>
+                        </thead>
+                        <tbody>
+                            ${frameworkRows}
+                        </tbody>
+                    </table>
+
+                    <h2>三、 动态沙箱行为取证</h2>
                     <p>将该涉案检材置入具有反检测特性的沙箱环境运行，提取到以下关键取证要素：</p>
                     
                     <h3>1. 运行时外联网络探测</h3>
@@ -674,9 +889,28 @@
 
                     <h3>2. 深度行为探针 (Frida Hook)</h3>
                     <p>对系统的敏感服务（如通讯录、短信、IMEI、相册等）实施底层挂钩检测，取证结果：</p>
-                    <div class="code-block">${fridaStr}</div>
+                    <p>${fridaHeadline}</p>
+                    <table>
+                        <thead>
+                            <tr><th width="8%">序号</th><th width="24%">敏感能力</th><th width="16%">类别</th><th width="37%">命中 API / 样例</th><th width="15%">调用次数</th></tr>
+                        </thead>
+                        <tbody>
+                            ${fridaRows}
+                        </tbody>
+                    </table>
 
-                    <h2>三、 综合研判结论</h2>
+                    <h3>2.2 原始调用明细</h3>
+                    <p>以下为 Frida 运行期间截获的原始调用样本，用于复核触发时机、参数与返回值。</p>
+                    <table>
+                        <thead>
+                            <tr><th width="8%">序号</th><th width="18%">触发时间</th><th width="24%">API 名称</th><th width="14%">类别</th><th width="18%">参数摘要</th><th width="18%">返回值</th></tr>
+                        </thead>
+                        <tbody>
+                            ${fridaLogRows}
+                        </tbody>
+                    </table>
+
+                    <h2>四、 综合研判结论</h2>
                     <p>依据《APP违法违规收集使用个人信息行为认定方法》等相关规定，结合上述静态签名和动态沙箱行为分析，该程序存在<b>${translateRisk(app.risk_assessment?.risk_level)}</b>。建议相关办案单位以此报告为线索，对涉及的后台服务器 IP 及数据流向开展进一步溯源打击。</p>
 
                     <div class="footer">
