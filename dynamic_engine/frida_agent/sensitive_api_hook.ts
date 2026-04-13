@@ -1,20 +1,10 @@
+import Java from "frida-java-bridge";
+
 "use strict";
 
 function bootstrapHooks(retryCount) {
-    if (typeof Java === "undefined") {
-        if ((retryCount || 0) >= 60) {
-            send({ type: "error", message: "Java bridge is not available." });
-            return;
-        }
-        if ((retryCount || 0) % 10 === 0) {
-            send({
-                type: "status",
-                message: "waiting for Java bridge",
-                retry: retryCount || 0
-            });
-        }
-        setTimeout(function () { bootstrapHooks((retryCount || 0) + 1); }, 1000);
-        return;
+    if ((retryCount || 0) === 0) {
+        send({ type: "status", message: "frida bootstrap entered" });
     }
 
     if (!Java.available) {
@@ -33,58 +23,63 @@ function bootstrapHooks(retryCount) {
         return;
     }
 
-    Java.perform(function () {
-        var Log = Java.use("android.util.Log");
-        var Exception = Java.use("java.lang.Exception");
-
-        function s(v) {
+    send({ type: "status", message: "java runtime detected" });
+    var performWithJava = typeof Java.performNow === "function" ? Java.performNow.bind(Java) : Java.perform.bind(Java);
+    try {
+        performWithJava(function () {
+            send({ type: "status", message: "java bridge ready" });
             try {
-                if (v === null || v === undefined) return "";
-                var t = String(v);
-                return t.length > 280 ? t.slice(0, 280) + "..." : t;
-            } catch (e) {
-                return "[unprintable]";
+            var Log = Java.use("android.util.Log");
+            var Exception = Java.use("java.lang.Exception");
+
+            function s(v) {
+                try {
+                    if (v === null || v === undefined) return "";
+                    var t = String(v);
+                    return t.length > 280 ? t.slice(0, 280) + "..." : t;
+                } catch (e) {
+                    return "[unprintable]";
+                }
             }
-        }
 
-        function stack() {
-            try {
-                return s(Log.getStackTraceString(Exception.$new()));
-            } catch (e) {
-                return "";
+            function stack() {
+                try {
+                    return s(Log.getStackTraceString(Exception.$new()));
+                } catch (e) {
+                    return "";
+                }
             }
-        }
 
-        function sendStatus(message) {
-            send({ type: "status", timestamp: Date.now() / 1000, message: message });
-        }
-
-        function sendError(message) {
-            send({ type: "error", timestamp: Date.now() / 1000, message: String(message) });
-        }
-
-        function sendApi(meta, args, ret, extra) {
-            var payload = {
-                type: "api_call",
-                timestamp: Date.now() / 1000,
-                category: meta.category || "other",
-                signal_key: meta.signalKey || meta.api,
-                api: meta.api,
-                description: meta.description || meta.api,
-                args: (args || []).map(s),
-                return_value: s(ret),
-                stack: stack()
-            };
-            if (extra) {
-                Object.keys(extra).forEach(function (key) { payload[key] = extra[key]; });
+            function sendStatus(message) {
+                send({ type: "status", timestamp: Date.now() / 1000, message: message });
             }
-            send(payload);
-        }
 
-        function has(text, patterns) {
-            var normalized = s(text).toLowerCase();
-            return patterns.some(function (item) { return normalized.indexOf(item) !== -1; });
-        }
+            function sendError(message) {
+                send({ type: "error", timestamp: Date.now() / 1000, message: String(message) });
+            }
+
+            function sendApi(meta, args, ret, extra) {
+                var payload = {
+                    type: "api_call",
+                    timestamp: Date.now() / 1000,
+                    category: meta.category || "other",
+                    signal_key: meta.signalKey || meta.api,
+                    api: meta.api,
+                    description: meta.description || meta.api,
+                    args: (args || []).map(s),
+                    return_value: s(ret),
+                    stack: stack()
+                };
+                if (extra) {
+                    Object.keys(extra).forEach(function (key) { payload[key] = extra[key]; });
+                }
+                send(payload);
+            }
+
+            function has(text, patterns) {
+                var normalized = s(text).toLowerCase();
+                return patterns.some(function (item) { return normalized.indexOf(item) !== -1; });
+            }
 
         function hookMethod(className, methodName, meta, options) {
             try {
@@ -297,9 +292,9 @@ function bootstrapHooks(retryCount) {
             { className: "android.app.ApplicationPackageManager", methodName: "queryIntentActivities", meta: { category: "package_manager", signalKey: "getInstalledPackages", api: "android.app.ApplicationPackageManager.queryIntentActivities", description: "query intent activities" } },
             { className: "android.app.ApplicationPackageManager", methodName: "queryIntentServices", meta: { category: "package_manager", signalKey: "getInstalledPackages", api: "android.app.ApplicationPackageManager.queryIntentServices", description: "query intent services" } },
             { className: "android.app.ApplicationPackageManager", methodName: "queryIntentReceivers", meta: { category: "package_manager", signalKey: "getInstalledPackages", api: "android.app.ApplicationPackageManager.queryIntentReceivers", description: "query intent receivers" } },
-            { className: "java.net.URL", methodName: "openConnection", meta: { category: "network", signalKey: "accessStorage", api: "java.net.URL.openConnection", description: "open URL connection" } },
-            { className: "java.net.Socket", methodName: "connect", meta: { category: "network", signalKey: "accessStorage", api: "java.net.Socket.connect", description: "open socket connection" } },
-            { className: "okhttp3.OkHttpClient", methodName: "newCall", meta: { category: "network", signalKey: "accessStorage", api: "okhttp3.OkHttpClient.newCall", description: "start OkHttp call" } },
+            { className: "java.net.URL", methodName: "openConnection", meta: { category: "network", signalKey: "accessNetwork", api: "java.net.URL.openConnection", description: "open URL connection" } },
+            { className: "java.net.Socket", methodName: "connect", meta: { category: "network", signalKey: "accessNetwork", api: "java.net.Socket.connect", description: "open socket connection" } },
+            { className: "okhttp3.OkHttpClient", methodName: "newCall", meta: { category: "network", signalKey: "accessNetwork", api: "okhttp3.OkHttpClient.newCall", description: "start OkHttp call" } },
             { className: "android.content.ContextWrapper", methodName: "openFileInput", meta: { category: "storage", signalKey: "accessStorage", api: "android.content.ContextWrapper.openFileInput", description: "read internal file" } },
             { className: "android.content.ContextWrapper", methodName: "openFileOutput", meta: { category: "storage", signalKey: "accessStorage", api: "android.content.ContextWrapper.openFileOutput", description: "write internal file" } },
             { className: "android.os.Environment", methodName: "getExternalStorageDirectory", meta: { category: "storage", signalKey: "accessStorage", api: "android.os.Environment.getExternalStorageDirectory", description: "read external storage path" } },
@@ -356,8 +351,14 @@ function bootstrapHooks(retryCount) {
             sendError("reflection hook failed: " + e);
         }
 
-        sendStatus("sensitive api hooks ready");
-    });
+                sendStatus("sensitive api hooks ready");
+            } catch (e) {
+                send({ type: "error", message: "hook bootstrap failed: " + e });
+            }
+        });
+    } catch (e) {
+        send({ type: "error", message: "Java.perform failed: " + e });
+    }
 }
 
 setImmediate(function () {

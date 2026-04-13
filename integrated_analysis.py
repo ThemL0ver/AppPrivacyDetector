@@ -41,14 +41,24 @@ class IntegratedAnalyzer:
         "getDeviceId": 2.4,
         "getSubscriberId": 2.4,
         "getMacAddress": 2.1,
+        "getAndroidId": 2.2,
+        "getOaid": 2.2,
         "getLocation": 2.0,
         "openCamera": 1.8,
         "startRecording": 1.8,
         "readContacts": 2.0,
         "readSms": 2.5,
+        "readCallLog": 2.6,
         "accessStorage": 1.3,
+        "accessNetwork": 1.1,
+        "accessCalendar": 1.6,
         "getInstalledPackages": 2.1,
         "getAccount": 1.7,
+        "readClipboard": 1.5,
+        "sendSms": 2.8,
+        "reflectionInvoke": 1.4,
+        "getSystemService": 0.8,
+        "appOpsSensitiveAction": 1.7,
     }
 
     SDK_CATEGORY_WEIGHTS = {
@@ -142,13 +152,22 @@ class IntegratedAnalyzer:
         # Use half-up style for positive scores to avoid long float tails in UI.
         return int(math.floor(float(value) + 0.5))
 
-    def __init__(self, samples_dir: str, results_dir: str = "results"):
+    def __init__(
+        self,
+        samples_dir: str,
+        results_dir: str = "results",
+        dynamic_timeout_per_apk: int = 300,
+    ):
         self.samples_dir = samples_dir
         self.results_dir = results_dir
         os.makedirs(results_dir, exist_ok=True)
 
         self.static_analyzer = APKBatchAnalyzer(samples_dir, results_dir)
-        self.dynamic_analyzer = DynamicBatchAnalyzer(samples_dir, results_dir)
+        self.dynamic_analyzer = DynamicBatchAnalyzer(
+            samples_dir,
+            results_dir,
+            per_apk_timeout=dynamic_timeout_per_apk,
+        )
 
     def perform_static_analysis(self) -> List[Dict[str, Any]]:
         print("=" * 50)

@@ -1,4 +1,5 @@
 import argparse
+import multiprocessing
 import os
 
 from integrated_analysis import IntegratedAnalyzer
@@ -11,6 +12,12 @@ def main() -> None:
         "--only-integrated",
         action="store_true",
         help="分析完成后仅保留 integrated_analysis_report.json",
+    )
+    parser.add_argument(
+        "--dynamic-timeout-per-apk",
+        type=int,
+        default=300,
+        help="动态分析单个 APK 的超时时间（秒），超时会自动终止并继续下一个样本",
     )
     args = parser.parse_args()
 
@@ -32,8 +39,13 @@ def main() -> None:
         print("执行模式: 仅静态分析")
     else:
         print("执行模式: 静态分析 + 动态分析")
+        print(f"动态单样本超时: {max(120, int(args.dynamic_timeout_per_apk))} 秒")
 
-    analyzer = IntegratedAnalyzer(samples_dir, results_dir)
+    analyzer = IntegratedAnalyzer(
+        samples_dir,
+        results_dir,
+        dynamic_timeout_per_apk=args.dynamic_timeout_per_apk,
+    )
     analyzer.run_full_analysis(skip_dynamic=args.skip_dynamic)
 
     if args.only_integrated:
@@ -57,4 +69,5 @@ def main() -> None:
 
 
 if __name__ == "__main__":
+    multiprocessing.freeze_support()
     main()

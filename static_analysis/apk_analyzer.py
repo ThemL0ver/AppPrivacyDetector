@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import contextlib
+import io
 import json
 import logging
 import os
 import sys
 import zipfile
+import xml.etree.ElementTree as ET
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
@@ -29,6 +32,7 @@ for logger_name in list(logging.Logger.manager.loggerDict):
         logging.getLogger(logger_name).setLevel(logging.ERROR)
 
 from androguard.core.apk import APK  # noqa: E402
+from androguard.core.axml import AXMLPrinter  # noqa: E402
 
 from static_analysis.permission_knowledge import (  # noqa: E402
     PermissionKnowledgeBase,
@@ -201,6 +205,16 @@ class APKAnalyzer:
     def _load_apk(self) -> APK:
         return APK(self.apk_path)
 
+    def _resolve_component_name(self, raw_name: str) -> str:
+        name = str(raw_name or "").strip()
+        if not name:
+            return ""
+        if name.startswith("."):
+            return f"{self.package_name}{name}"
+        if "." not in name and self.package_name:
+            return f"{self.package_name}.{name}"
+        return name
+
     def _load_zip_entries(self) -> List[str]:
         try:
             with zipfile.ZipFile(self.apk_path, "r") as apk_file:
@@ -359,50 +373,169 @@ class APKAnalyzer:
             + len(self.queries.get("intents", [])),
         }
 
+    def _parse_manifest_by_zip_fallback(self) -> None:
+        with zipfile.ZipFile(self.apk_path, "r") as apk_file:
+            manifest_bytes = apk_file.read("AndroidManifest.xml")
+
+        axml = AXMLPrinter(manifest_bytes)
+        if not axml.is_valid():
+            raise ValueError("AndroidManifest.xml is invalid binary XML")
+
+        manifest_payload = axml.get_xml()
+        if isinstance(manifest_payload, bytes):
+            manifest_text = manifest_payload.decode("utf-8", errors="ignore")
+        else:
+            manifest_text = str(manifest_payload)
+
+        self.manifest_xml = ET.fromstring(manifest_text)
+        self.package_name = str(self.manifest_xml.get("package", "") or "").strip()
+        self.version_name = safe_android_attr(self.manifest_xml, "versionName")
+        self.version_code = safe_android_attr(self.manifest_xml, "versionCode")
+
+        uses_sdk = self.manifest_xml.find("uses-sdk")
+        if uses_sdk is not None:
+            self.min_sdk = safe_android_attr(uses_sdk, "minSdkVersion")
+            self.target_sdk = safe_android_attr(uses_sdk, "targetSdkVersion")
+        else:
+            self.min_sdk = ""
+            self.target_sdk = ""
+
+        self.requested_permissions = ordered_unique(
+            [
+                safe_android_attr(node, "name")
+                for tag in ("uses-permission", "uses-permission-sdk-23", "uses-permission-sdk-m")
+                for node in self.manifest_xml.findall(tag)
+                if safe_android_attr(node, "name")
+            ]
+        )
+        self.declared_permissions = ordered_unique(
+            [
+                safe_android_attr(node, "name")
+                for node in self.manifest_xml.findall("permission")
+                if safe_android_attr(node, "name")
+            ]
+        )
+        self.implied_permissions = []
+        self.permissions = ordered_unique(
+            self.requested_permissions + self.declared_permissions + self.implied_permissions
+        )
+
+        app_element = self.manifest_xml.find("application")
+        app_label = safe_android_attr(app_element, "label") if app_element is not None else ""
+        self.app_name = app_label if app_label and not app_label.startswith("@") else self.package_name
+
+        if app_element is None:
+            self.activities = []
+            self.services = []
+            self.receivers = []
+            self.providers = []
+            self.libraries = []
+        else:
+            self.activities = ordered_unique(
+                [
+                    self._resolve_component_name(safe_android_attr(node, "name"))
+                    for node in app_element.findall("activity")
+                    if safe_android_attr(node, "name")
+                ]
+            )
+            self.services = ordered_unique(
+                [
+                    self._resolve_component_name(safe_android_attr(node, "name"))
+                    for node in app_element.findall("service")
+                    if safe_android_attr(node, "name")
+                ]
+            )
+            self.receivers = ordered_unique(
+                [
+                    self._resolve_component_name(safe_android_attr(node, "name"))
+                    for node in app_element.findall("receiver")
+                    if safe_android_attr(node, "name")
+                ]
+            )
+            self.providers = ordered_unique(
+                [
+                    self._resolve_component_name(safe_android_attr(node, "name"))
+                    for node in app_element.findall("provider")
+                    if safe_android_attr(node, "name")
+                ]
+            )
+            self.libraries = ordered_unique(
+                [
+                    safe_android_attr(node, "name")
+                    for tag in ("uses-library", "uses-native-library")
+                    for node in app_element.findall(tag)
+                    if safe_android_attr(node, "name")
+                ]
+            )
+
+        self.features = ordered_unique(
+            [
+                safe_android_attr(node, "name") or safe_android_attr(node, "glEsVersion")
+                for node in self.manifest_xml.findall("uses-feature")
+                if safe_android_attr(node, "name") or safe_android_attr(node, "glEsVersion")
+            ]
+        )
+
+        self._requested_permission_details = {}
+        self._aosp_permission_details = {}
+        self._declared_permission_details = {}
+
+    def _finalize_manifest_state(self) -> None:
+        self.application_metadata = self._extract_application_metadata()
+        self.provider_authorities = self._extract_provider_authorities()
+        self.queries = self._extract_queries()
+        self._zip_entries = self._load_zip_entries()
+
+        self.third_party_sdks = self._detect_signatures(SDK_SIGNATURES)
+        self.app_frameworks = self._detect_signatures(FRAMEWORK_SIGNATURES)
+        self.analysis_flags = self._collect_analysis_flags()
+
     def parse_manifest(self) -> bool:
         try:
-            self.apk = self._load_apk()
-            self.manifest_xml = self.apk.get_android_manifest_xml()
+            with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+                self.apk = self._load_apk()
+                self.manifest_xml = self.apk.get_android_manifest_xml()
 
-            self.package_name = self.apk.get_package()
-            self.app_name = str(self.apk.get_app_name() or "")
-            self.version_name = str(self.apk.get_androidversion_name() or "")
-            self.version_code = str(self.apk.get_androidversion_code() or "")
-            self.min_sdk = str(self.apk.get_min_sdk_version() or "")
-            self.target_sdk = str(self.apk.get_target_sdk_version() or "")
+                self.package_name = self.apk.get_package()
+                self.app_name = str(self.apk.get_app_name() or "")
+                self.version_name = str(self.apk.get_androidversion_name() or "")
+                self.version_code = str(self.apk.get_androidversion_code() or "")
+                self.min_sdk = str(self.apk.get_min_sdk_version() or "")
+                self.target_sdk = str(self.apk.get_target_sdk_version() or "")
 
-            self.requested_permissions = ordered_unique(self.apk.get_permissions() or [])
-            self.declared_permissions = ordered_unique(self.apk.get_declared_permissions() or [])
-            self.implied_permissions = self._normalize_implied_permissions(
-                self.apk.get_uses_implied_permission_list() or []
-            )
-            self.permissions = ordered_unique(
-                self.requested_permissions + self.declared_permissions + self.implied_permissions
-            )
+                self.requested_permissions = ordered_unique(self.apk.get_permissions() or [])
+                self.declared_permissions = ordered_unique(self.apk.get_declared_permissions() or [])
+                self.implied_permissions = self._normalize_implied_permissions(
+                    self.apk.get_uses_implied_permission_list() or []
+                )
+                self.permissions = ordered_unique(
+                    self.requested_permissions + self.declared_permissions + self.implied_permissions
+                )
 
-            self.activities = ordered_unique(self.apk.get_activities() or [])
-            self.services = ordered_unique(self.apk.get_services() or [])
-            self.receivers = ordered_unique(self.apk.get_receivers() or [])
-            self.providers = ordered_unique(self.apk.get_providers() or [])
-            self.features = ordered_unique(self.apk.get_features() or [])
-            self.libraries = ordered_unique(self.apk.get_libraries() or [])
+                self.activities = ordered_unique(self.apk.get_activities() or [])
+                self.services = ordered_unique(self.apk.get_services() or [])
+                self.receivers = ordered_unique(self.apk.get_receivers() or [])
+                self.providers = ordered_unique(self.apk.get_providers() or [])
+                self.features = ordered_unique(self.apk.get_features() or [])
+                self.libraries = ordered_unique(self.apk.get_libraries() or [])
 
-            self._requested_permission_details = self.apk.get_details_permissions() or {}
-            self._aosp_permission_details = self.apk.get_requested_aosp_permissions_details() or {}
-            self._declared_permission_details = self.apk.get_declared_permissions_details() or {}
+                self._requested_permission_details = self.apk.get_details_permissions() or {}
+                self._aosp_permission_details = self.apk.get_requested_aosp_permissions_details() or {}
+                self._declared_permission_details = self.apk.get_declared_permissions_details() or {}
 
-            self.application_metadata = self._extract_application_metadata()
-            self.provider_authorities = self._extract_provider_authorities()
-            self.queries = self._extract_queries()
-            self._zip_entries = self._load_zip_entries()
-
-            self.third_party_sdks = self._detect_signatures(SDK_SIGNATURES)
-            self.app_frameworks = self._detect_signatures(FRAMEWORK_SIGNATURES)
-            self.analysis_flags = self._collect_analysis_flags()
+            self._finalize_manifest_state()
             return True
-        except Exception as error:
-            print(f"解析 APK 失败: {self.apk_path} -> {error}")
-            return False
+        except Exception as primary_error:
+            print(f"主解析失败，尝试降级解析: {self.apk_path} -> {primary_error}")
+            try:
+                self.apk = None
+                self._parse_manifest_by_zip_fallback()
+                self._finalize_manifest_state()
+                print(f"降级解析成功: {self.apk_path}")
+                return True
+            except Exception as fallback_error:
+                print(f"解析 APK 失败: {self.apk_path} -> {fallback_error}")
+                return False
 
     def _resolve_permission_payload(
         self, permission_name: str, source: str

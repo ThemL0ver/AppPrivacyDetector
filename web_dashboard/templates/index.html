@@ -335,15 +335,19 @@
             if (fromCallLogs.length > 0) {
                 return fromCallLogs;
             }
+            return [];
+        }
 
-            const sensitiveApiCalls = dynamicAnalysis?.sensitive_api_calls || {};
-            return Object.entries(sensitiveApiCalls).map(([signalKey, payload]) => ({
-                signal_key: signalKey,
-                category: 'runtime_probe',
-                description: payload?.description || signalKey,
-                count: payload?.count || 0,
-                sample_apis: Array.isArray(payload?.logs) ? payload.logs.slice(0, 4) : []
-            })).sort((a, b) => (b.count || 0) - (a.count || 0));
+        function getFridaErrorMessage(dynamicAnalysis) {
+            const frida = dynamicAnalysis?.frida_analysis || {};
+            if (frida?.error) {
+                return String(frida.error);
+            }
+            const summary = frida?.summary || {};
+            if (Array.isArray(summary.error_messages) && summary.error_messages.length) {
+                return String(summary.error_messages[0]);
+            }
+            return '';
         }
 
         function buildFridaTableRows(dynamicAnalysis) {
@@ -646,10 +650,11 @@
 
                     if (dynamicAnalysis.frida_analysis) {
                         const frida = dynamicAnalysis.frida_analysis;
+                        const fridaErrorMessage = getFridaErrorMessage(dynamicAnalysis);
                         dynamicHtml += `<div class="p-3 bg-white border border-info rounded shadow-sm">
                             <h6 class="text-info fw-bold mb-3"><span class="fs-5">💉</span> Frida 深度探针检测结果</h6>`;
-                        if (frida.error) {
-                            dynamicHtml += `<p class="text-danger mb-0">探针注入失败或被加壳环境防御: ${frida.error}</p>`;
+                        if (fridaErrorMessage) {
+                            dynamicHtml += `<p class="text-danger mb-2">探针注入失败或未进入 Java Hook 阶段: ${escapeHtml(fridaErrorMessage)}</p>`;
                         } else {
                             dynamicHtml += `
                                 <div class="d-flex gap-3">
@@ -658,6 +663,9 @@
                                     <div class="badge bg-secondary p-2 px-3 fs-6 rounded-pill">侦测时长: <span class="text-info">${parseFloat(frida.summary?.duration || 0).toFixed(1)} s</span></div>
                                 </div>
                             `;
+                            if (!(frida.summary?.total_api_calls > 0)) {
+                                dynamicHtml += `<p class="text-muted mt-3 mb-0">本次 Frida 深度探针未拦截到敏感 API 调用。</p>`;
+                            }
                         }
                         dynamicHtml += `</div>`;
                     }
@@ -766,10 +774,11 @@
             }
 
             const fridaSummary = dyn?.frida_analysis?.summary || {};
-            let fridaHeadline = '探针未生效或未配置注入。';
-            if (dyn?.frida_analysis?.error) {
-                fridaHeadline = `探针注入遭遇应用对抗防御，错误日志：${escapeHtml(dyn.frida_analysis.error)}`;
-            } else if (Object.keys(fridaSummary).length > 0) {
+            const fridaErrorMessage = getFridaErrorMessage(dyn);
+            let fridaHeadline = '本次 Frida 深度探针未拦截到敏感 API 调用。';
+            if (fridaErrorMessage) {
+                fridaHeadline = `探针注入遭遇应用对抗防御或未进入 Java Hook 阶段，错误日志：${escapeHtml(fridaErrorMessage)}`;
+            } else if ((fridaSummary.total_api_calls || 0) > 0) {
                 fridaHeadline = `拦截到敏感调用 <b>${normalizeScore(fridaSummary.total_api_calls || 0)}</b> 次，归并为 <b>${normalizeScore(fridaSummary.total_hooked_signals || fridaSummary.total_hooked_apis || 0)}</b> 类信号。`;
             }
             const fridaRows = buildFridaTableRows(dyn);

@@ -1,0 +1,9 @@
+{
+  "name": "appprivacydetector-frida-agent",
+  "private": true,
+  "version": "1.0.0",
+  "description": "Frida 17 bundle for Android Java runtime hooks",
+  "dependencies": {
+    "frida-java-bridge": "7.0.13"
+  }
+}
