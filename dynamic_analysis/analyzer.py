@@ -18,13 +18,21 @@ except ImportError:
 
 
 class DynamicAnalyzer:
-    def __init__(self, apk_path: str, output_dir: str = "output"):
+    def __init__(
+        self,
+        apk_path: str,
+        output_dir: str = "output",
+        manual_probe_seconds: int = 0,
+        low_coverage_api_threshold: int = 4,
+    ):
         self.apk_path = apk_path
         self.output_dir = output_dir
         self.package_name = self._extract_package_name_from_apk()
         self.adb_path = self._find_adb()
         self.sensitive_apis = self._load_sensitive_apis()
         self.monitoring_logs: List[str] = []
+        self.manual_probe_seconds = max(0, int(manual_probe_seconds))
+        self.low_coverage_api_threshold = max(1, int(low_coverage_api_threshold))
         self.frida_analyzer = EnhancedDynamicAnalyzer(apk_path, output_dir) if frida_available else None
         self.device_id: Optional[str] = None
         self.app_pid: Optional[str] = None
@@ -449,6 +457,149 @@ class DynamicAnalyzer:
                 permissions.append(stripped)
         return permissions or None
 
+    def _is_low_coverage_frida(self, frida_summary: Dict[str, Any]) -> bool:
+        total_api_calls = int(frida_summary.get("total_api_calls") or 0)
+        total_signals = int(frida_summary.get("total_hooked_signals") or 0)
+        if total_api_calls < self.low_coverage_api_threshold:
+            return True
+        if total_signals < 2:
+            return True
+        return False
+
+    def _manual_guided_probe(self) -> bool:
+        if self.manual_probe_seconds <= 0:
+            return True
+
+        print(
+            f"[Frida][Manual] low coverage detected, manual interaction window: {self.manual_probe_seconds}s"
+        )
+        print("[Frida][Manual] please grant permissions / login / navigate sensitive pages in emulator now")
+
+        started_at = time.time()
+        last_reported = -1
+        while time.time() - started_at < self.manual_probe_seconds:
+            remaining = max(0, self.manual_probe_seconds - int(time.time() - started_at))
+            if remaining != last_reported and (remaining % 10 == 0 or remaining <= 5):
+                print(f"[Frida][Manual] remaining: {remaining}s")
+                last_reported = remaining
+            time.sleep(1)
+
+        print("[Frida][Manual] manual interaction window finished, run a short monkey burst")
+        self.run_monkey_burst(event_count=40, throttle_ms=150)
+        return True
+
+    @staticmethod
+    def _merge_unique_text(items: List[Any]) -> List[str]:
+        merged: List[str] = []
+        seen = set()
+        for item in items:
+            text = str(item or "").strip()
+            if not text or text in seen:
+                continue
+            seen.add(text)
+            merged.append(text)
+        return merged
+
+    def _aggregate_frida_call_logs(self, call_logs: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        grouped: Dict[str, Dict[str, Any]] = {}
+        for entry in call_logs:
+            signal_key = str(entry.get("signal_key") or entry.get("api") or "unknown")
+            api_name = str(entry.get("api") or "")
+            category = str(entry.get("category") or "other")
+            description = str(entry.get("description") or signal_key)
+
+            group = grouped.setdefault(
+                signal_key,
+                {
+                    "signal_key": signal_key,
+                    "category": category,
+                    "description": description,
+                    "count": 0,
+                    "sample_apis": [],
+                },
+            )
+            group["count"] += 1
+            if api_name and api_name not in group["sample_apis"]:
+                group["sample_apis"].append(api_name)
+
+        return sorted(grouped.values(), key=lambda item: (-item["count"], item["signal_key"]))
+
+    def _merge_frida_payload(
+        self,
+        first_payload: Dict[str, Any],
+        second_payload: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        first_results = first_payload.get("results", {}) or {}
+        second_results = second_payload.get("results", {}) or {}
+        first_summary = first_payload.get("summary", {}) or {}
+        second_summary = second_payload.get("summary", {}) or {}
+
+        call_logs = list(first_results.get("call_logs", []) or []) + list(second_results.get("call_logs", []) or [])
+        hooked_apis = self._merge_unique_text(
+            list(first_results.get("hooked_apis", []) or []) + list(second_results.get("hooked_apis", []) or [])
+        )
+        status_messages = self._merge_unique_text(
+            list(first_results.get("status_messages", []) or []) + list(second_results.get("status_messages", []) or [])
+        )
+        errors = self._merge_unique_text(
+            list(first_results.get("errors", []) or []) + list(second_results.get("errors", []) or [])
+        )
+
+        signal_counts: Dict[str, int] = {}
+        for source in [first_results.get("signal_counts", {}) or {}, second_results.get("signal_counts", {}) or {}]:
+            for key, value in source.items():
+                signal_counts[str(key)] = signal_counts.get(str(key), 0) + int(value or 0)
+
+        category_counts: Dict[str, int] = {}
+        for source in [first_results.get("category_counts", {}) or {}, second_results.get("category_counts", {}) or {}]:
+            for key, value in source.items():
+                category_counts[str(key)] = category_counts.get(str(key), 0) + int(value or 0)
+
+        aggregated_calls = self._aggregate_frida_call_logs(call_logs)
+        merged_duration = round(
+            float(first_results.get("duration") or first_summary.get("duration") or 0.0)
+            + float(second_results.get("duration") or second_summary.get("duration") or 0.0),
+            3,
+        )
+
+        merged_results = {
+            "hooked_apis": hooked_apis,
+            "call_logs": call_logs,
+            "duration": merged_duration,
+            "errors": errors,
+            "signal_counts": signal_counts,
+            "category_counts": category_counts,
+            "aggregated_calls": aggregated_calls,
+            "status_messages": status_messages,
+        }
+        merged_summary = {
+            "total_hooked_apis": len(hooked_apis),
+            "total_api_calls": len(call_logs),
+            "total_hooked_signals": len(signal_counts),
+            "total_categories": len(category_counts),
+            "duration": merged_duration,
+            "errors": len(errors),
+            "hooked_apis": hooked_apis,
+            "signal_counts": signal_counts,
+            "category_counts": category_counts,
+            "aggregated_calls": aggregated_calls[:30],
+            "status_messages": status_messages[:30],
+            "error_messages": errors[:30],
+        }
+        merged_payload: Dict[str, Any] = {
+            "results": merged_results,
+            "summary": merged_summary,
+            "adaptive_probe": {
+                "enabled": True,
+                "manual_probe_seconds": self.manual_probe_seconds,
+                "low_coverage_api_threshold": self.low_coverage_api_threshold,
+                "pass_count": 2,
+            },
+        }
+        if errors and not merged_summary["total_api_calls"]:
+            merged_payload["error"] = errors[0]
+        return merged_payload
+
     def _perform_frida_analysis(self) -> Dict[str, Any]:
         print("start Frida runtime analysis")
         if not self.package_name:
@@ -459,17 +610,47 @@ class DynamicAnalyzer:
             self.start_app()
             time.sleep(3)
         try:
-            frida_results = self.frida_analyzer.perform_frida_analysis(
+            first_results = self.frida_analyzer.perform_frida_analysis(
                 duration=60,
                 probe_callback=self.exercise_app_under_frida,
             )
-            frida_summary = self.frida_analyzer.get_frida_summary()
-            payload: Dict[str, Any] = {"results": frida_results, "summary": frida_summary}
-            if frida_results.get("error"):
-                payload["error"] = frida_results["error"]
-            elif frida_summary.get("error_messages") and not frida_summary.get("total_api_calls"):
-                payload["error"] = frida_summary["error_messages"][0]
-            return payload
+            first_summary = self.frida_analyzer.get_frida_summary()
+            first_payload: Dict[str, Any] = {"results": first_results, "summary": first_summary}
+            if first_results.get("error"):
+                first_payload["error"] = first_results["error"]
+            elif first_summary.get("error_messages") and not first_summary.get("total_api_calls"):
+                first_payload["error"] = first_summary["error_messages"][0]
+
+            should_run_manual_probe = (
+                self.manual_probe_seconds > 0
+                and self._is_low_coverage_frida(first_summary)
+            )
+            if not should_run_manual_probe:
+                first_payload["adaptive_probe"] = {
+                    "enabled": self.manual_probe_seconds > 0,
+                    "manual_probe_seconds": self.manual_probe_seconds,
+                    "low_coverage_api_threshold": self.low_coverage_api_threshold,
+                    "pass_count": 1,
+                    "triggered_manual_probe": False,
+                }
+                return first_payload
+
+            print("[Frida] low coverage detected, starting manual-guided second pass")
+            second_duration = max(60, self.manual_probe_seconds + 20)
+            second_results = self.frida_analyzer.perform_frida_analysis(
+                duration=second_duration,
+                probe_callback=self._manual_guided_probe,
+            )
+            second_summary = self.frida_analyzer.get_frida_summary()
+            second_payload: Dict[str, Any] = {"results": second_results, "summary": second_summary}
+            if second_results.get("error"):
+                second_payload["error"] = second_results["error"]
+            elif second_summary.get("error_messages") and not second_summary.get("total_api_calls"):
+                second_payload["error"] = second_summary["error_messages"][0]
+
+            merged_payload = self._merge_frida_payload(first_payload, second_payload)
+            merged_payload["adaptive_probe"]["triggered_manual_probe"] = True
+            return merged_payload
         except Exception as error:
             return {"error": str(error)}
 
@@ -584,10 +765,17 @@ def _dynamic_analysis_worker(
     results_dir: str,
     result_file: str,
     status_file: str,
+    manual_probe_seconds: int,
+    low_coverage_api_threshold: int,
 ) -> None:
     status_payload = {"success": False, "error": ""}
     try:
-        analyzer = DynamicAnalyzer(apk_path, results_dir)
+        analyzer = DynamicAnalyzer(
+            apk_path,
+            results_dir,
+            manual_probe_seconds=manual_probe_seconds,
+            low_coverage_api_threshold=low_coverage_api_threshold,
+        )
         analyzer.save_result(result_file)
         status_payload["success"] = True
     except Exception as error:
@@ -603,10 +791,20 @@ class DynamicBatchAnalyzer:
         samples_dir: str,
         results_dir: str = "results",
         per_apk_timeout: int = 300,
+        manual_probe_seconds: int = 0,
+        low_coverage_api_threshold: int = 4,
+        manual_probe_apk_allowlist: Optional[List[str]] = None,
     ):
         self.samples_dir = samples_dir
         self.results_dir = results_dir
         self.per_apk_timeout = max(120, int(per_apk_timeout))
+        self.manual_probe_seconds = max(0, int(manual_probe_seconds))
+        self.low_coverage_api_threshold = max(1, int(low_coverage_api_threshold))
+        self.manual_probe_apk_allowlist = {
+            str(item).strip().lower()
+            for item in (manual_probe_apk_allowlist or [])
+            if str(item).strip()
+        }
         os.makedirs(results_dir, exist_ok=True)
 
     def _build_failed_result(self, apk_file: str, error_message: str) -> Dict[str, Any]:
@@ -632,6 +830,15 @@ class DynamicBatchAnalyzer:
     def _analyze_single_apk(self, apk_file: str, apk_path: str) -> Dict[str, Any]:
         result_file = os.path.join(self.results_dir, f"{apk_file}_dynamic_analysis.json")
         status_file = os.path.join(self.results_dir, f"{apk_file}_dynamic_status.json")
+        normalized_apk_name = str(apk_file).strip().lower()
+        should_use_manual_probe = (
+            self.manual_probe_seconds > 0
+            and (
+                not self.manual_probe_apk_allowlist
+                or normalized_apk_name in self.manual_probe_apk_allowlist
+            )
+        )
+        manual_seconds_for_apk = self.manual_probe_seconds if should_use_manual_probe else 0
 
         for stale_file in [result_file, status_file]:
             if os.path.exists(stale_file):
@@ -642,7 +849,14 @@ class DynamicBatchAnalyzer:
 
         worker = multiprocessing.Process(
             target=_dynamic_analysis_worker,
-            args=(apk_path, self.results_dir, result_file, status_file),
+            args=(
+                apk_path,
+                self.results_dir,
+                result_file,
+                status_file,
+                manual_seconds_for_apk,
+                self.low_coverage_api_threshold,
+            ),
         )
         worker.start()
         worker.join(timeout=self.per_apk_timeout)
@@ -702,6 +916,15 @@ class DynamicBatchAnalyzer:
         apk_files = [file_name for file_name in os.listdir(self.samples_dir) if file_name.endswith(".apk")]
         print(f"found {len(apk_files)} APK files")
         print(f"dynamic per-APK timeout: {self.per_apk_timeout}s")
+        print(
+            f"adaptive manual probe: {'on' if self.manual_probe_seconds > 0 else 'off'} "
+            f"(window={self.manual_probe_seconds}s, threshold={self.low_coverage_api_threshold})"
+        )
+        if self.manual_probe_apk_allowlist:
+            print(
+                "manual probe allowlist: "
+                + ", ".join(sorted(self.manual_probe_apk_allowlist))
+            )
 
         for apk_file in apk_files:
             apk_path = os.path.join(self.samples_dir, apk_file)

@@ -18,66 +18,66 @@ from app_type_permissions import (
 
 class IntegratedAnalyzer:
     DOMAIN_BASE_SCORES = {
-        "location": 4.0,
-        "camera": 4.0,
-        "microphone": 4.0,
-        "contacts": 4.2,
-        "sms": 5.0,
-        "phone": 4.0,
-        "storage": 2.6,
-        "calendar": 2.0,
-        "account": 3.0,
-        "biometric": 3.0,
-        "identifier": 3.2,
-        "app_installation": 3.0,
+        "location": 3.2,
+        "camera": 3.0,
+        "microphone": 3.0,
+        "contacts": 3.4,
+        "sms": 4.4,
+        "phone": 3.2,
+        "storage": 1.8,
+        "calendar": 1.4,
+        "account": 2.2,
+        "biometric": 2.4,
+        "identifier": 2.6,
+        "app_installation": 2.2,
         "shortcut": 1.0,
-        "system_control": 3.2,
-        "system_inspection": 4.8,
+        "system_control": 2.4,
+        "system_inspection": 3.0,
         "notification": 1.0,
         "other": 1.2,
     }
 
     DYNAMIC_API_WEIGHTS = {
-        "getDeviceId": 2.4,
-        "getSubscriberId": 2.4,
-        "getMacAddress": 2.1,
-        "getAndroidId": 2.2,
-        "getOaid": 2.2,
-        "getLocation": 2.0,
-        "openCamera": 1.8,
-        "startRecording": 1.8,
-        "readContacts": 2.0,
-        "readSms": 2.5,
-        "readCallLog": 2.6,
-        "accessStorage": 1.3,
-        "accessNetwork": 1.1,
-        "accessCalendar": 1.6,
-        "getInstalledPackages": 2.1,
-        "getAccount": 1.7,
-        "readClipboard": 1.5,
-        "sendSms": 2.8,
-        "reflectionInvoke": 1.4,
-        "getSystemService": 0.8,
-        "appOpsSensitiveAction": 1.7,
+        "getDeviceId": 2.0,
+        "getSubscriberId": 2.0,
+        "getMacAddress": 1.8,
+        "getAndroidId": 1.8,
+        "getOaid": 1.8,
+        "getLocation": 1.7,
+        "openCamera": 1.5,
+        "startRecording": 1.5,
+        "readContacts": 1.7,
+        "readSms": 2.2,
+        "readCallLog": 2.3,
+        "accessStorage": 1.0,
+        "accessNetwork": 0.9,
+        "accessCalendar": 1.2,
+        "getInstalledPackages": 1.8,
+        "getAccount": 1.4,
+        "readClipboard": 1.3,
+        "sendSms": 2.5,
+        "reflectionInvoke": 1.1,
+        "getSystemService": 0.6,
+        "appOpsSensitiveAction": 1.4,
     }
 
     SDK_CATEGORY_WEIGHTS = {
-        "ad": 2.2,
-        "analytics": 1.6,
-        "social": 1.0,
-        "payment": 0.8,
-        "map": 0.8,
-        "push": 0.3,
+        "ad": 1.2,
+        "analytics": 0.9,
+        "social": 0.5,
+        "payment": 0.4,
+        "map": 0.4,
+        "push": 0.2,
     }
 
     SDK_RISK_HINT_WEIGHTS = {
-        "low": 0.2,
-        "medium": 0.8,
-        "中": 0.8,
-        "medium_high": 1.2,
-        "中高": 1.2,
-        "high": 1.6,
-        "高": 1.6,
+        "low": 0.1,
+        "medium": 0.4,
+        "中": 0.4,
+        "medium_high": 0.7,
+        "中高": 0.7,
+        "high": 1.0,
+        "高": 1.0,
     }
 
     INFRASTRUCTURE_PATTERNS = (
@@ -133,7 +133,6 @@ class IntegratedAnalyzer:
         "read_sms",
         "send_sms",
         "write_sms",
-        "read_logs",
         "package_usage_stats",
         "query_all_packages",
         "get_installed_apps",
@@ -145,6 +144,28 @@ class IntegratedAnalyzer:
         "send_tiantong_sms",
         "receive_beidou_sms",
         "send_beidou_sms",
+        "read_logs",
+    )
+
+    CRITICAL_HARD_VIOLATION_PATTERNS = (
+        "read_sms",
+        "send_sms",
+        "write_sms",
+        "read_call_log",
+        "write_call_log",
+        "accessibility",
+        "bind_accessibility_service",
+        "receive_tiantong_sms",
+        "send_tiantong_sms",
+        "receive_beidou_sms",
+        "send_beidou_sms",
+    )
+
+    MODERATE_HARD_VIOLATION_PATTERNS = (
+        "package_usage_stats",
+        "query_all_packages",
+        "get_installed_apps",
+        "read_logs",
     )
 
     @staticmethod
@@ -157,6 +178,9 @@ class IntegratedAnalyzer:
         samples_dir: str,
         results_dir: str = "results",
         dynamic_timeout_per_apk: int = 300,
+        manual_probe_seconds: int = 0,
+        low_coverage_api_threshold: int = 4,
+        manual_probe_apk_allowlist: Optional[List[str]] = None,
     ):
         self.samples_dir = samples_dir
         self.results_dir = results_dir
@@ -167,6 +191,9 @@ class IntegratedAnalyzer:
             samples_dir,
             results_dir,
             per_apk_timeout=dynamic_timeout_per_apk,
+            manual_probe_seconds=manual_probe_seconds,
+            low_coverage_api_threshold=low_coverage_api_threshold,
+            manual_probe_apk_allowlist=manual_probe_apk_allowlist,
         )
 
     def perform_static_analysis(self) -> List[Dict[str, Any]]:
@@ -264,7 +291,12 @@ class IntegratedAnalyzer:
 
         level_weight = float(PERMISSION_RISK_LEVELS.get(main_risk_level, 0.0))
         domain_weight = self.DOMAIN_BASE_SCORES.get(domain, self.DOMAIN_BASE_SCORES["other"])
-        weight = max(level_weight, domain_weight)
+        if level_weight > 0:
+            # Blend standard risk level and domain sensitivity to avoid over-penalizing
+            # declaration-only permissions in common commercial apps.
+            weight = (level_weight * 0.78) + (domain_weight * 0.30)
+        else:
+            weight = domain_weight * 0.45
 
         perm = permission.lower()
         if any(pattern in perm for pattern in self.LOW_SIGNAL_PATTERNS):
@@ -282,6 +314,14 @@ class IntegratedAnalyzer:
         perm = permission.lower()
         return any(pattern in perm for pattern in self.HARD_VIOLATION_PATTERNS)
 
+    def _get_hard_violation_severity(self, permission: str) -> Optional[str]:
+        perm = permission.lower()
+        if any(pattern in perm for pattern in self.CRITICAL_HARD_VIOLATION_PATTERNS):
+            return "critical"
+        if any(pattern in perm for pattern in self.MODERATE_HARD_VIOLATION_PATTERNS):
+            return "moderate"
+        return None
+
     def _score_static_permissions(
         self,
         app_type: str,
@@ -296,6 +336,8 @@ class IntegratedAnalyzer:
         excess_domain_scores: Dict[str, float] = {}
         excess_domain_counts: Dict[str, int] = {}
         hard_violation_count = 0
+        hard_violation_critical_count = 0
+        hard_violation_moderate_count = 0
 
         for perm_detail in permission_details:
             permission_name = perm_detail.get("name", "")
@@ -318,8 +360,13 @@ class IntegratedAnalyzer:
                 "risk_level": risk_level,
             }
 
-            if self._is_hard_violation_permission(permission_name):
+            hard_violation_severity = self._get_hard_violation_severity(permission_name)
+            if hard_violation_severity:
                 hard_violation_count += 1
+                if hard_violation_severity == "critical":
+                    hard_violation_critical_count += 1
+                else:
+                    hard_violation_moderate_count += 1
                 non_necessary_permission_details.append(record)
                 excess_domain_scores[domain] = max(excess_domain_scores.get(domain, 0.0), adjusted_weight)
                 excess_domain_counts[domain] = excess_domain_counts.get(domain, 0) + 1
@@ -334,19 +381,25 @@ class IntegratedAnalyzer:
         excess_domain_score = round(sum(excess_domain_scores.values()), 2)
         contextual_domain_score = round(sum(contextual_domain_scores.values()), 2)
         excess_duplicate_bonus = round(
-            sum(min(count - 1, 2) * 0.35 for count in excess_domain_counts.values() if count > 1),
+            sum(min(count - 1, 2) * 0.20 for count in excess_domain_counts.values() if count > 1),
             2,
         )
-        hard_violation_bonus = round(min(hard_violation_count * 2.5, 10.0), 2)
+        hard_violation_bonus = round(
+            min(hard_violation_critical_count * 1.8, 5.4)
+            + min(hard_violation_moderate_count * 0.7, 2.8),
+            2,
+        )
+        contextual_mitigation = round(min(len(contextual_domain_scores) * 0.45, 2.5), 2)
 
         static_score_raw = (
             min(
-                85.0,
-                excess_domain_score * 1.5
-                + contextual_domain_score * 0.18
+                75.0,
+                excess_domain_score * 1.15
+                + contextual_domain_score * 0.12
                 + excess_duplicate_bonus
                 + hard_violation_bonus,
             )
+            - contextual_mitigation
         )
         static_score = self._to_int_score(static_score_raw)
 
@@ -363,11 +416,14 @@ class IntegratedAnalyzer:
             "contextual_domains": sorted(contextual_domain_scores.keys()),
             "excess_domains": sorted(excess_domain_scores.keys()),
             "hard_violation_count": hard_violation_count,
+            "hard_violation_critical_count": hard_violation_critical_count,
+            "hard_violation_moderate_count": hard_violation_moderate_count,
             "breakdown": {
                 "excess_domain_score": excess_domain_score,
                 "contextual_domain_score": contextual_domain_score,
                 "excess_duplicate_bonus": excess_duplicate_bonus,
                 "hard_violation_bonus": hard_violation_bonus,
+                "contextual_mitigation": contextual_mitigation,
             },
         }
 
@@ -384,7 +440,7 @@ class IntegratedAnalyzer:
                 self.SDK_CATEGORY_WEIGHTS.get(category, 0.6),
                 self.SDK_RISK_HINT_WEIGHTS.get(risk_hint, 0.0),
             )
-        sdk_score = round(min(sdk_score, 6.0), 2)
+        sdk_score = round(min(sdk_score, 4.0), 2)
 
         queries = static_result.get("queries", {}) or {}
         query_count = (
@@ -392,16 +448,16 @@ class IntegratedAnalyzer:
             + len(queries.get("providers", []) or [])
             + len(queries.get("intents", []) or [])
         )
-        query_score = round(min(query_count * 0.4, 3.0), 2)
+        query_score = round(min(query_count * 0.05, 1.5), 2)
 
         custom_sensitive_permissions = {
             item.get("name")
             for item in permission_analysis.get("permission_details", [])
             if item.get("is_custom") and item.get("main_risk_level") in {"中高", "高", "极高"}
         }
-        custom_permission_score = round(min(len(custom_sensitive_permissions) * 0.7, 3.0), 2)
+        custom_permission_score = round(min(len(custom_sensitive_permissions) * 0.35, 1.5), 2)
 
-        context_score = self._to_int_score(min(10.0, sdk_score + query_score + custom_permission_score))
+        context_score = self._to_int_score(min(6.0, sdk_score + query_score + custom_permission_score))
         return {
             "score": context_score,
             "sdk_count": len(static_result.get("third_party_sdks", []) or []),
@@ -447,8 +503,8 @@ class IntegratedAnalyzer:
             if count <= 0:
                 continue
 
-            weight = self.DYNAMIC_API_WEIGHTS.get(api_type, 1.4)
-            contribution = round(min(math.log1p(count) * weight, 4.5), 2)
+            weight = self.DYNAMIC_API_WEIGHTS.get(api_type, 1.2)
+            contribution = round(min(math.log1p(count) * weight * 0.75, 3.5), 2)
             api_signals.append(
                 {
                     "api_type": api_type,
@@ -461,12 +517,12 @@ class IntegratedAnalyzer:
 
         network_traffic_count = len(dynamic_result.get("network_traffic", []))
         network_weight = SENSITIVE_API_WEIGHTS.get("network", 1.0)
-        network_score = round(min(math.log1p(network_traffic_count) * (0.85 * network_weight), 2.8), 2)
+        network_score = round(min(math.log1p(network_traffic_count) * (0.7 * network_weight), 2.0), 2)
 
         privacy_leak_count = len(dynamic_result.get("privacy_leaks", []))
-        privacy_score = round(min(privacy_leak_count * 2.5, 6.0), 2)
+        privacy_score = round(min(privacy_leak_count * 2.2, 5.0), 2)
 
-        dynamic_score = self._to_int_score(min(15.0, api_score + network_score + privacy_score))
+        dynamic_score = self._to_int_score(min(12.0, api_score + network_score + privacy_score))
         return {
             "score": dynamic_score,
             "api_signals": api_signals,
@@ -495,7 +551,7 @@ class IntegratedAnalyzer:
         dynamic_assessment = self._score_dynamic_behavior(dynamic_result)
 
         static_score = self._to_int_score(
-            min(85.0, static_permission_assessment["score"] + static_context_assessment["score"])
+            min(78.0, static_permission_assessment["score"] + static_context_assessment["score"])
         )
         total_score = self._to_int_score(min(100.0, static_score + dynamic_assessment["score"]))
 
@@ -588,7 +644,7 @@ class IntegratedAnalyzer:
 
         report = {
             "analysis_date": datetime.now().isoformat(timespec="seconds"),
-            "scoring_model": "context-aware-v3",
+            "scoring_model": "context-aware-v4-balanced",
             "total_analyzed": total_analyzed,
             "high_risk_apps": [item["apk_file"] for item in integrated_results if item["risk_assessment"]["risk_level"] == "high"],
             "medium_risk_apps": [item["apk_file"] for item in integrated_results if item["risk_assessment"]["risk_level"] == "medium"],

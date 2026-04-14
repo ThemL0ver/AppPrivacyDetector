@@ -19,6 +19,24 @@ def main() -> None:
         default=300,
         help="动态分析单个 APK 的超时时间（秒），超时会自动终止并继续下一个样本",
     )
+    parser.add_argument(
+        "--manual-probe-seconds",
+        type=int,
+        default=0,
+        help="低覆盖时人工操作窗口时长（秒），0 表示关闭人工补采",
+    )
+    parser.add_argument(
+        "--low-coverage-api-threshold",
+        type=int,
+        default=4,
+        help="Frida 首轮命中 API 调用低于该阈值时触发人工补采",
+    )
+    parser.add_argument(
+        "--manual-probe-apks",
+        type=str,
+        default="",
+        help="人工补采目标 APK 文件名列表（逗号分隔，如 Mooc.apk,BaiDu.apk）；为空表示对全部样本生效",
+    )
     args = parser.parse_args()
 
     samples_dir = "samples"
@@ -40,11 +58,26 @@ def main() -> None:
     else:
         print("执行模式: 静态分析 + 动态分析")
         print(f"动态单样本超时: {max(120, int(args.dynamic_timeout_per_apk))} 秒")
+        print(
+            f"人工补采: {'开启' if int(args.manual_probe_seconds) > 0 else '关闭'} "
+            f"(窗口={max(0, int(args.manual_probe_seconds))}秒, 触发阈值={max(1, int(args.low_coverage_api_threshold))})"
+        )
+
+    manual_probe_apks = [
+        item.strip()
+        for item in str(args.manual_probe_apks or "").split(",")
+        if item.strip()
+    ]
+    if manual_probe_apks:
+        print("人工补采目标 APK: " + ", ".join(manual_probe_apks))
 
     analyzer = IntegratedAnalyzer(
         samples_dir,
         results_dir,
         dynamic_timeout_per_apk=args.dynamic_timeout_per_apk,
+        manual_probe_seconds=args.manual_probe_seconds,
+        low_coverage_api_threshold=args.low_coverage_api_threshold,
+        manual_probe_apk_allowlist=manual_probe_apks,
     )
     analyzer.run_full_analysis(skip_dynamic=args.skip_dynamic)
 
