@@ -3,8 +3,10 @@ import multiprocessing
 import os
 import re
 import subprocess
+import threading
 import time
 from typing import Any, Dict, List, Optional
+from xml.etree import ElementTree as ET
 
 from tqdm import tqdm
 
@@ -18,26 +20,211 @@ except ImportError:
 
 
 class DynamicAnalyzer:
+    SAFE_ACTION_KEYWORDS = (
+        "允许",
+        "始终允许",
+        "仅在使用中",
+        "仅在使用期间",
+        "同意",
+        "确定",
+        "确认",
+        "继续",
+        "进入",
+        "开始",
+        "去开启",
+        "去设置",
+    )
+
+    DISMISS_ACTION_KEYWORDS = (
+        "跳过",
+        "关闭",
+        "我知道了",
+        "知道了",
+        "以后再说",
+        "稍后",
+        "暂不",
+        "下次再说",
+        "稍后再说",
+        "稍后处理",
+        "下次",
+    )
+
+    NEGATIVE_ACTION_KEYWORDS = (
+        "拒绝",
+        "不允许",
+        "不同意",
+        "禁止",
+        "取消",
+        "拒不",
+        "暂不授权",
+        "不再",
+    )
+
+    PERMISSION_ALLOW_RESOURCE_HINTS = (
+        "permission_allow_always_button",
+        "permission_allow_foreground_only_button",
+        "permission_allow_one_time_button",
+        "permission_allow_button",
+        "permission_allow_selected_button",
+        "permission_allow_all_button",
+        "grant_dialog_button_allow",
+        "button1",
+    )
+
+    PERMISSION_DENY_RESOURCE_HINTS = (
+        "permission_deny_and_dont_ask_again_button",
+        "permission_deny_button",
+        "permission_no_upgrade_button",
+        "permission_no_upgrade_and_dont_ask_again_button",
+        "grant_dialog_button_deny",
+        "button2",
+    )
+
+    LOGIN_GATE_KEYWORDS = (
+        "登录",
+        "立即登录",
+        "手机号登录",
+        "微信登录",
+        "qq登录",
+        "验证码",
+        "密码",
+        "账号",
+        "一键登录",
+        "授权登录",
+        "登录后",
+        "注册",
+    )
+
+    LOADING_KEYWORDS = (
+        "加载",
+        "启动中",
+        "请稍候",
+        "正在打开",
+        "初始化",
+        "loading",
+        "splash",
+        "opening",
+    )
+
+    SYSTEM_DIALOG_PACKAGES = (
+        "android",
+        "com.android.permissioncontroller",
+        "com.google.android.permissioncontroller",
+        "com.android.packageinstaller",
+        "com.android.systemui",
+    )
+
+    BLOCKED_INTERACTION_KEYWORDS = (
+        "下载",
+        "安装",
+        "更新",
+        "立即下载",
+        "立即安装",
+        "应用市场",
+        "游戏中心",
+        "download",
+        "install",
+        "update",
+        "market",
+        "store",
+        "gamecenter",
+        "launcher",
+    )
+
+    CLEANUP_PROTECTED_PACKAGES = (
+        "android",
+        "com.android.systemui",
+        "com.android.settings",
+        "com.android.shell",
+        "com.android.permissioncontroller",
+        "com.google.android.permissioncontroller",
+        "com.android.packageinstaller",
+        "com.google.android.packageinstaller",
+        "com.android.inputmethod.latin",
+        "com.google.android.inputmethod.latin",
+        "com.android.documentsui",
+        "com.bignox.launcher",
+        "com.android.launcher",
+        "com.android.launcher3",
+        "com.google.android.apps.nexuslauncher",
+    )
+
+    CLEANUP_PROTECTED_PREFIXES = (
+        "com.android.",
+        "com.google.android.",
+        "android.",
+        "com.qualcomm.",
+        "com.mediatek.",
+        "com.bignox.",
+        "com.nox.",
+    )
+
     def __init__(
         self,
         apk_path: str,
         output_dir: str = "output",
         manual_probe_seconds: int = 0,
         low_coverage_api_threshold: int = 4,
+        analysis_timeout_budget_seconds: int = 0,
     ):
         self.apk_path = apk_path
         self.output_dir = output_dir
         self.package_name = self._extract_package_name_from_apk()
+        self.main_activity = self._extract_main_activity_from_apk()
         self.adb_path = self._find_adb()
         self.sensitive_apis = self._load_sensitive_apis()
         self.monitoring_logs: List[str] = []
         self.manual_probe_seconds = max(0, int(manual_probe_seconds))
         self.low_coverage_api_threshold = max(1, int(low_coverage_api_threshold))
+        self.analysis_timeout_budget_seconds = max(0, int(analysis_timeout_budget_seconds))
+        self.analysis_started_at = 0.0
+        self.analysis_deadline: Optional[float] = None
         self.frida_analyzer = EnhancedDynamicAnalyzer(apk_path, output_dir) if frida_available else None
         self.device_id: Optional[str] = None
         self.app_pid: Optional[str] = None
+        self.app_pids: List[str] = []
+        self.last_launch_error: Optional[str] = None
         if self.frida_analyzer and self.package_name:
             self.frida_analyzer.set_package_name(self.package_name)
+
+    def _activate_analysis_budget(self) -> None:
+        self.analysis_started_at = time.time()
+        if self.analysis_timeout_budget_seconds > 0:
+            self.analysis_deadline = self.analysis_started_at + self.analysis_timeout_budget_seconds
+        else:
+            self.analysis_deadline = None
+
+    def _remaining_analysis_budget(self) -> Optional[float]:
+        if self.analysis_deadline is None:
+            return None
+        return max(0.0, self.analysis_deadline - time.time())
+
+    def _has_analysis_budget(self, minimum_seconds: int = 1, reserve_seconds: int = 0) -> bool:
+        remaining = self._remaining_analysis_budget()
+        if remaining is None:
+            return True
+        return remaining > max(0, int(minimum_seconds) + int(reserve_seconds))
+
+    def _step_budget(
+        self,
+        requested_seconds: int,
+        minimum_seconds: int = 0,
+        reserve_seconds: int = 0,
+    ) -> int:
+        requested = max(0, int(requested_seconds))
+        minimum = max(0, int(minimum_seconds))
+        reserve = max(0, int(reserve_seconds))
+        remaining = self._remaining_analysis_budget()
+        if remaining is None:
+            return requested
+        allowed = max(0, int(remaining) - reserve)
+        if allowed <= 0:
+            return 0
+        if minimum and allowed < minimum:
+            return 0
+        if requested <= 0:
+            return allowed
+        return max(minimum if minimum else 0, min(requested, allowed))
 
     def _find_adb(self) -> str:
         adb_paths = [
@@ -82,6 +269,8 @@ class DynamicAnalyzer:
                     [aapt, "dump", "badging", self.apk_path],
                     capture_output=True,
                     text=True,
+                    encoding="utf-8",
+                    errors="replace",
                     timeout=20,
                 )
                 if result.returncode == 0:
@@ -101,6 +290,48 @@ class DynamicAnalyzer:
         except Exception as error:
             print(f"extract package name by androguard failed: {error}")
         return None
+
+    def _extract_main_activity_from_apk(self) -> Optional[str]:
+        aapt = self._find_aapt()
+        if aapt:
+            try:
+                result = subprocess.run(
+                    [aapt, "dump", "badging", self.apk_path],
+                    capture_output=True,
+                    text=True,
+                    encoding="utf-8",
+                    errors="replace",
+                    timeout=20,
+                )
+                if result.returncode == 0:
+                    match = re.search(r"launchable-activity: name='([^']+)'", result.stdout)
+                    if match:
+                        return str(match.group(1)).strip()
+            except Exception as error:
+                print(f"extract main activity by aapt failed: {error}")
+
+        try:
+            from androguard.core.apk import APK
+
+            apk = APK(self.apk_path)
+            main_activity = apk.get_main_activity()
+            if main_activity:
+                return str(main_activity).strip()
+        except Exception as error:
+            print(f"extract main activity by androguard failed: {error}")
+        return None
+
+    def _build_launch_component(self) -> Optional[str]:
+        if not self.package_name or not self.main_activity:
+            return None
+        activity_name = str(self.main_activity).strip()
+        if not activity_name:
+            return None
+        if activity_name.startswith("."):
+            return f"{self.package_name}/{activity_name}"
+        if "." not in activity_name:
+            return f"{self.package_name}/.{activity_name}"
+        return f"{self.package_name}/{activity_name}"
 
     def _load_sensitive_apis(self) -> Dict[str, str]:
         return {
@@ -125,9 +356,14 @@ class DynamicAnalyzer:
             "reflectionInvoke": "reflection invoke",
             "getSystemService": "system service request",
             "appOpsSensitiveAction": "AppOps sensitive action",
+            "permissionCheck": "permission check",
+            "permissionRequest": "permission request",
+            "webViewNavigation": "WebView navigation",
+            "cookieAccess": "WebView cookie access",
+            "antiAnalysisProbe": "anti-analysis or root-detection probe",
         }
 
-    def _run_adb_command(self, command: List[str], timeout: int = 15) -> Optional[str]:
+    def _run_adb_command(self, command: List[str], timeout: int = 15, quiet: bool = False) -> Optional[str]:
         full_command = [self.adb_path] + command
         try:
             process = subprocess.Popen(
@@ -135,22 +371,26 @@ class DynamicAnalyzer:
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 text=True,
+                encoding="utf-8",
+                errors="replace",
             )
             try:
                 stdout, stderr = process.communicate(timeout=timeout)
             except subprocess.TimeoutExpired:
                 process.kill()
                 stdout, stderr = process.communicate()
-                print(f"adb command timed out: {' '.join(full_command)}")
+                if not quiet:
+                    print(f"adb command timed out: {' '.join(full_command)}")
                 return None
             if process.returncode != 0:
                 message = (stderr or stdout or "").strip()
-                if message:
+                if message and not quiet:
                     print(f"adb command failed: {message}")
                 return None
             return (stdout or "").strip()
         except Exception as error:
-            print(f"adb execution failed: {error}")
+            if not quiet:
+                print(f"adb execution failed: {error}")
             return None
 
     def _check_command_exists(self, command: str) -> bool:
@@ -212,6 +452,8 @@ class DynamicAnalyzer:
                 [self.adb_path, "install", "-r", "-t", "-g", self.apk_path],
                 capture_output=True,
                 text=True,
+                encoding="utf-8",
+                errors="replace",
                 timeout=timeout,
             )
             if result.returncode == 0 or "INSTALL_FAILED_ALREADY_EXISTS" in (result.stderr or ""):
@@ -223,61 +465,990 @@ class DynamicAnalyzer:
             print(f"apk install error: {error}")
         return False
 
+    def _refresh_app_pid(self) -> Optional[str]:
+        if not self.package_name:
+            self.app_pid = None
+            self.app_pids = []
+            return None
+        output = self._run_adb_command(["shell", "pidof", self.package_name], timeout=10, quiet=True)
+        if not output:
+            self.app_pid = None
+            self.app_pids = []
+            self._sync_frida_preferred_pids()
+            return None
+        self.app_pids = [item.strip() for item in str(output).split() if str(item).strip()]
+        self.app_pid = self.app_pids[0] if self.app_pids else None
+        self._sync_frida_preferred_pids()
+        return self.app_pid
+
+    def _get_preferred_app_pids(self) -> List[int]:
+        self._refresh_app_pid()
+        preferred: List[int] = []
+        seen = set()
+        for pid_text in self.app_pids:
+            try:
+                pid = int(pid_text)
+            except (TypeError, ValueError):
+                continue
+            if pid <= 0 or pid in seen:
+                continue
+            seen.add(pid)
+            preferred.append(pid)
+        return preferred
+
+    def _sync_frida_preferred_pids(self) -> None:
+        if not self.frida_analyzer:
+            return
+        preferred_pids: List[int] = []
+        seen = set()
+        for pid_text in self.app_pids:
+            try:
+                pid = int(pid_text)
+            except (TypeError, ValueError):
+                continue
+            if pid <= 0 or pid in seen:
+                continue
+            seen.add(pid)
+            preferred_pids.append(pid)
+        self.frida_analyzer.set_preferred_pids(preferred_pids)
+
     def _is_app_running(self) -> bool:
+        return self._refresh_app_pid() is not None
+
+    def _force_stop_app(self) -> bool:
         if not self.package_name:
             return False
-        output = self._run_adb_command(["shell", "pidof", self.package_name], timeout=10)
-        if output:
-            self.app_pid = output.split()[0].strip()
-            return True
-        return False
-
-    def start_app(self) -> bool:
-        if not self.package_name:
-            return False
-        if self._is_app_running():
-            return True
-        command = ["shell", "monkey", "-p", self.package_name, "-c", "android.intent.category.LAUNCHER", "1"]
-        output = self._run_adb_command(command, timeout=30)
-        time.sleep(4)
-        if output is not None and self._is_app_running():
-            return True
-        return self._is_app_running()
-
-    def simulate_user_interactions(self) -> bool:
-        actions = [
-            ["shell", "input", "tap", "540", "1680"],
-            None,
-            ["shell", "input", "tap", "540", "960"],
-            None,
-            ["shell", "input", "swipe", "900", "1700", "200", "300", "400"],
-            None,
-            ["shell", "input", "swipe", "540", "1600", "540", "500", "300"],
-            None,
-            ["shell", "input", "tap", "820", "320"],
-            None,
-            ["shell", "input", "keyevent", "4"],
-        ]
-        for action in actions:
-            if action:
-                self._run_adb_command(action, timeout=10)
-            time.sleep(2)
+        self._run_adb_command(["shell", "am", "force-stop", self.package_name], timeout=15, quiet=True)
+        self.app_pid = None
+        self.app_pids = []
+        self._sync_frida_preferred_pids()
+        time.sleep(2)
         return True
 
-    def run_monkey_burst(self, event_count: int = 120, throttle_ms: int = 250) -> bool:
-        if not self.package_name:
+    @staticmethod
+    def _extract_package_names_from_text(text: str) -> List[str]:
+        package_names = set()
+        normalized_text = str(text or "")
+        patterns = [
+            r"\b([A-Za-z0-9_]+(?:\.[A-Za-z0-9_]+){1,})/",
+            r"\bA=([A-Za-z0-9_]+(?:\.[A-Za-z0-9_]+){1,})\b",
+            r"\bpackageName=([A-Za-z0-9_]+(?:\.[A-Za-z0-9_]+){1,})\b",
+            r"\bpackage:([A-Za-z0-9_]+(?:\.[A-Za-z0-9_]+){1,})\b",
+        ]
+        for pattern in patterns:
+            for match in re.findall(pattern, normalized_text):
+                package_name = str(match or "").strip()
+                if package_name:
+                    package_names.add(package_name)
+        return sorted(package_names)
+
+    def _list_user_installed_packages(self) -> List[str]:
+        output = self._run_adb_command(["shell", "pm", "list", "packages", "-3"], timeout=30, quiet=True) or ""
+        package_names = []
+        for line in output.splitlines():
+            stripped = str(line or "").strip()
+            if not stripped.startswith("package:"):
+                continue
+            package_name = stripped.split("package:", 1)[1].strip()
+            if package_name:
+                package_names.append(package_name)
+        return self._merge_unique_text(package_names)
+
+    def _collect_home_packages(self) -> List[str]:
+        home_packages = set(self.CLEANUP_PROTECTED_PACKAGES)
+        resolve_commands = [
+            ["shell", "cmd", "package", "resolve-activity", "--brief", "-a", "android.intent.action.MAIN", "-c", "android.intent.category.HOME"],
+            ["shell", "pm", "resolve-activity", "-a", "android.intent.action.MAIN", "-c", "android.intent.category.HOME"],
+        ]
+        for command in resolve_commands:
+            output = self._run_adb_command(command, timeout=20, quiet=True) or ""
+            for package_name in self._extract_package_names_from_text(output):
+                home_packages.add(package_name)
+
+        for package_name in self._list_user_installed_packages():
+            lowered = package_name.lower()
+            if "launcher" in lowered or lowered.endswith(".home") or ".home." in lowered:
+                home_packages.add(package_name)
+
+        foreground_package = self._get_foreground_package()
+        if foreground_package:
+            lowered = foreground_package.lower()
+            if "launcher" in lowered or lowered.endswith(".home") or ".home." in lowered:
+                home_packages.add(foreground_package)
+
+        return sorted(home_packages)
+
+    def _is_home_surface_package(self, package_name: Optional[str]) -> bool:
+        normalized = str(package_name or "").strip().lower()
+        if not normalized:
+            return True
+        home_packages = {str(item).strip().lower() for item in self._collect_home_packages()}
+        if normalized in home_packages:
+            return True
+        if normalized in {str(item).strip().lower() for item in self.SYSTEM_DIALOG_PACKAGES}:
+            return True
+        return "launcher" in normalized or normalized.endswith(".home") or ".home." in normalized
+
+    def _build_cleanup_protected_packages(self) -> set:
+        protected_packages = set(self.SYSTEM_DIALOG_PACKAGES)
+        protected_packages.update(self.CLEANUP_PROTECTED_PACKAGES)
+        protected_packages.update(self._collect_home_packages())
+        return {str(item).strip() for item in protected_packages if str(item).strip()}
+
+    def _is_protected_cleanup_package(
+        self,
+        package_name: Optional[str],
+        protected_packages: Optional[set] = None,
+        allow_target: bool = False,
+    ) -> bool:
+        normalized = str(package_name or "").strip()
+        if not normalized:
+            return True
+
+        target_package = str(self.package_name or "").strip()
+        if allow_target and target_package and normalized == target_package:
             return False
 
+        protected = {str(item).strip().lower() for item in (protected_packages or self._build_cleanup_protected_packages())}
+        lowered = normalized.lower()
+        if lowered in protected:
+            return True
+        return any(lowered.startswith(prefix) for prefix in self.CLEANUP_PROTECTED_PREFIXES)
+
+    def _force_stop_package(
+        self,
+        package_name: Optional[str],
+        protected_packages: Optional[set] = None,
+        allow_target: bool = False,
+        quiet: bool = True,
+    ) -> bool:
+        normalized = str(package_name or "").strip()
+        if not normalized:
+            return False
+        if self._is_protected_cleanup_package(
+            normalized,
+            protected_packages=protected_packages,
+            allow_target=allow_target,
+        ):
+            return False
+        self._run_adb_command(["shell", "am", "force-stop", normalized], timeout=15, quiet=quiet)
+        if self.package_name and normalized == self.package_name:
+            self.app_pid = None
+        time.sleep(0.4)
+        return True
+
+    def _clear_package_data(self, package_name: Optional[str], quiet: bool = True) -> bool:
+        normalized = str(package_name or "").strip()
+        if not normalized:
+            return False
+        output = self._run_adb_command(["shell", "pm", "clear", normalized], timeout=45, quiet=quiet)
+        if output is None:
+            return False
+        return "success" in output.lower()
+
+    def _collect_background_candidate_packages(self) -> List[str]:
+        protected_packages = self._build_cleanup_protected_packages()
+        package_names = set()
+        dump_commands = [
+            ["shell", "dumpsys", "activity", "recents"],
+            ["shell", "dumpsys", "activity", "activities"],
+            ["shell", "dumpsys", "window", "windows"],
+        ]
+        for command in dump_commands:
+            output = self._run_adb_command(command, timeout=25, quiet=True) or ""
+            package_names.update(self._extract_package_names_from_text(output))
+
+        foreground_package = self._get_foreground_package()
+        if foreground_package:
+            package_names.add(foreground_package)
+
+        target_package = str(self.package_name or "").strip()
+        cleaned = []
+        for package_name in sorted(package_names):
+            if not package_name or package_name == target_package:
+                continue
+            if self._is_protected_cleanup_package(package_name, protected_packages=protected_packages):
+                continue
+            cleaned.append(package_name)
+        return self._merge_unique_text(cleaned)
+
+    def _return_to_home_screen(self, retries: int = 3) -> bool:
+        for _ in range(max(1, int(retries))):
+            self._run_adb_command(["shell", "input", "keyevent", "3"], timeout=8, quiet=True)
+            time.sleep(1)
+            foreground_package = self._get_foreground_package()
+            if self._is_home_surface_package(foreground_package):
+                return True
+        return False
+
+    def reset_analysis_environment(
+        self,
+        clear_app_data: bool = False,
+        cleanup_background_apps: bool = True,
+        clear_logs: bool = True,
+        cleanup_label: str = "",
+    ) -> Dict[str, Any]:
+        cleanup_summary: Dict[str, Any] = {
+            "label": cleanup_label,
+            "device_connected": False,
+            "desktop_ready": False,
+            "app_data_cleared": False,
+            "force_stopped_packages": [],
+            "background_packages_cleaned": [],
+            "remaining_foreground_package": None,
+            "errors": [],
+        }
+
+        if cleanup_label:
+            print(f"[cleanup] {cleanup_label}")
+
+        if not self._check_device_with_retry():
+            cleanup_summary["errors"].append("device is not connected")
+            return cleanup_summary
+
+        cleanup_summary["device_connected"] = True
+        protected_packages = self._build_cleanup_protected_packages()
+        target_package = str(self.package_name or "").strip()
+
+        self._return_to_home_screen(retries=2)
+
+        if target_package and self._force_stop_package(
+            target_package,
+            protected_packages=protected_packages,
+            allow_target=True,
+            quiet=True,
+        ):
+            cleanup_summary["force_stopped_packages"].append(target_package)
+
+        if cleanup_background_apps:
+            self._run_adb_command(["shell", "am", "kill-all"], timeout=20, quiet=True)
+            self._run_adb_command(["shell", "cmd", "activity", "kill-all"], timeout=20, quiet=True)
+            for package_name in self._collect_background_candidate_packages():
+                if self._force_stop_package(
+                    package_name,
+                    protected_packages=protected_packages,
+                    allow_target=False,
+                    quiet=True,
+                ):
+                    cleanup_summary["background_packages_cleaned"].append(package_name)
+
+        if clear_app_data and target_package:
+            cleanup_summary["app_data_cleared"] = self._clear_package_data(target_package, quiet=True)
+
+        if clear_logs:
+            self._run_adb_command(["logcat", "-c"], timeout=15, quiet=True)
+
+        self._return_to_home_screen(retries=3)
+        foreground_package = self._get_foreground_package()
+        if foreground_package and not self._is_protected_cleanup_package(
+            foreground_package,
+            protected_packages=protected_packages,
+            allow_target=False,
+        ):
+            if self._force_stop_package(
+                foreground_package,
+                protected_packages=protected_packages,
+                allow_target=False,
+                quiet=True,
+            ):
+                cleanup_summary["background_packages_cleaned"].append(foreground_package)
+            self._return_to_home_screen(retries=2)
+
+        cleanup_summary["force_stopped_packages"] = self._merge_unique_text(cleanup_summary["force_stopped_packages"])
+        cleanup_summary["background_packages_cleaned"] = self._merge_unique_text(
+            cleanup_summary["background_packages_cleaned"]
+        )
+        cleanup_summary["remaining_foreground_package"] = self._get_foreground_package()
+        cleanup_summary["desktop_ready"] = self._return_to_home_screen(retries=2)
+        self.app_pid = None
+        time.sleep(1)
+        return cleanup_summary
+
+    def cleanup_runtime_state(
+        self,
+        clear_app_data: bool = False,
+        cleanup_background_apps: bool = False,
+        clear_logs: bool = False,
+    ) -> None:
+        self.reset_analysis_environment(
+            clear_app_data=clear_app_data,
+            cleanup_background_apps=cleanup_background_apps,
+            clear_logs=clear_logs,
+            cleanup_label="worker cleanup",
+        )
+
+    def _get_foreground_package(self) -> Optional[str]:
+        window_dump = self._run_adb_command(["shell", "dumpsys", "window", "windows"], timeout=20, quiet=True) or ""
+        patterns = [
+            r"mCurrentFocus=Window\{[^\n]*\s([A-Za-z0-9._]+)/(?:[A-Za-z0-9.$_]+)\}",
+            r"mFocusedApp=.*ActivityRecord\{[^\n]*\s([A-Za-z0-9._]+)/",
+        ]
+        for pattern in patterns:
+            match = re.search(pattern, window_dump)
+            if match:
+                return str(match.group(1)).strip()
+
+        activity_dump = self._run_adb_command(["shell", "dumpsys", "activity", "activities"], timeout=20, quiet=True) or ""
+        for pattern in [
+            r"topResumedActivity=.*? ([A-Za-z0-9._]+)/",
+            r"mResumedActivity:.*? ([A-Za-z0-9._]+)/",
+        ]:
+            match = re.search(pattern, activity_dump)
+            if match:
+                return str(match.group(1)).strip()
+        return None
+
+    def _is_target_foreground(self) -> bool:
+        if not self.package_name:
+            return False
+        return self._get_foreground_package() == self.package_name
+
+    def _is_system_dialog_package(self, package_name: Optional[str]) -> bool:
+        return str(package_name or "").strip() in self.SYSTEM_DIALOG_PACKAGES
+
+    def _is_controlled_foreground(self, allow_system_dialogs: bool = False) -> bool:
+        foreground_package = self._get_foreground_package()
+        if not foreground_package:
+            return False
+        if self.package_name and foreground_package == self.package_name:
+            return True
+        return allow_system_dialogs and self._is_system_dialog_package(foreground_package)
+
+    def _should_keep_ui_node(self, package_name: str, include_system_dialogs: bool = False) -> bool:
+        normalized = str(package_name or "").strip()
+        if not normalized:
+            return True
+        if self.package_name and normalized == self.package_name:
+            return True
+        return include_system_dialogs and self._is_system_dialog_package(normalized)
+
+    def _parse_bounds(self, bounds_text: str) -> Optional[Dict[str, int]]:
+        match = re.match(r"\[(\d+),(\d+)\]\[(\d+),(\d+)\]", str(bounds_text or "").strip())
+        if not match:
+            return None
+        left, top, right, bottom = [int(value) for value in match.groups()]
+        if right <= left or bottom <= top:
+            return None
+        return {
+            "left": left,
+            "top": top,
+            "right": right,
+            "bottom": bottom,
+            "center_x": int((left + right) / 2),
+            "center_y": int((top + bottom) / 2),
+            "width": right - left,
+            "height": bottom - top,
+        }
+
+    def _get_screen_size(self) -> Dict[str, int]:
+        output = self._run_adb_command(["shell", "wm", "size"], timeout=10, quiet=True) or ""
+        matches = re.findall(r"(\d+)x(\d+)", output)
+        if matches:
+            width, height = matches[-1]
+            return {"width": max(int(width), 480), "height": max(int(height), 800)}
+        return {"width": 1080, "height": 1920}
+
+    def _dump_ui_snapshot(self, include_system_dialogs: bool = False) -> Dict[str, Any]:
+        target_path = "/sdcard/appprivacydetector_ui.xml"
+        dump_output = self._run_adb_command(["shell", "uiautomator", "dump", target_path], timeout=20, quiet=True)
+        if dump_output is None:
+            return {"nodes": [], "clickable_nodes": [], "safe_action_nodes": [], "texts": [], "signature": ""}
+
+        xml_text = self._run_adb_command(["shell", "cat", target_path], timeout=20, quiet=True) or ""
+        try:
+            root = ET.fromstring(xml_text)
+        except ET.ParseError:
+            return {"nodes": [], "clickable_nodes": [], "safe_action_nodes": [], "texts": [], "signature": ""}
+
+        nodes: List[Dict[str, Any]] = []
+        clickable_nodes: List[Dict[str, Any]] = []
+        safe_action_nodes: List[Dict[str, Any]] = []
+        texts: List[str] = []
+
+        for element in root.iter("node"):
+            package_name = str(element.attrib.get("package", "")).strip()
+            if not self._should_keep_ui_node(package_name, include_system_dialogs=include_system_dialogs):
+                continue
+
+            bounds = self._parse_bounds(element.attrib.get("bounds", ""))
+            if not bounds:
+                continue
+
+            text = str(element.attrib.get("text", "")).strip()
+            content_desc = str(element.attrib.get("content-desc", "")).strip()
+            resource_id = str(element.attrib.get("resource-id", "")).strip()
+            class_name = str(element.attrib.get("class", "")).strip()
+            clickable = str(element.attrib.get("clickable", "")).lower() == "true"
+            enabled = str(element.attrib.get("enabled", "")).lower() == "true"
+            scrollable = str(element.attrib.get("scrollable", "")).lower() == "true"
+
+            normalized_text = " ".join(part for part in [text, content_desc, resource_id] if part).strip()
+            node = {
+                "package": package_name,
+                "text": text,
+                "content_desc": content_desc,
+                "resource_id": resource_id,
+                "class_name": class_name,
+                "clickable": clickable,
+                "enabled": enabled,
+                "scrollable": scrollable,
+                "bounds": bounds,
+                "normalized_text": normalized_text,
+                "is_system_dialog": self._is_system_dialog_package(package_name),
+            }
+            nodes.append(node)
+            if normalized_text:
+                texts.append(normalized_text)
+            if clickable and enabled and bounds["width"] >= 24 and bounds["height"] >= 24:
+                clickable_nodes.append(node)
+                if not self._is_negative_action_node(node) and (
+                    self._is_permission_allow_node(node)
+                    or self._is_general_positive_action_node(node)
+                    or self._is_dismiss_action_node(node)
+                ):
+                    safe_action_nodes.append(node)
+
+        signature_parts = []
+        for node in nodes[:12]:
+            label = node["text"] or node["content_desc"] or node["resource_id"]
+            if label:
+                signature_parts.append(label)
+
+        return {
+            "nodes": nodes,
+            "clickable_nodes": clickable_nodes,
+            "safe_action_nodes": safe_action_nodes,
+            "texts": texts[:30],
+            "signature": "|".join(signature_parts[:8]),
+        }
+
+    def _has_loading_marker(self, snapshot: Dict[str, Any]) -> bool:
+        texts = snapshot.get("texts", []) or []
+        lowered_texts = " ".join(str(item) for item in texts).lower()
+        return any(keyword in lowered_texts for keyword in self.LOADING_KEYWORDS)
+
+    def _detect_login_gate(self, snapshot: Optional[Dict[str, Any]] = None) -> bool:
+        snapshot = snapshot or self._dump_ui_snapshot()
+        texts = snapshot.get("texts", []) or []
+        merged = " ".join(str(item) for item in texts)
+        lowered = merged.lower()
+        return any(keyword in merged for keyword in self.LOGIN_GATE_KEYWORDS) or any(
+            keyword in lowered for keyword in ["login", "sign in", "sign-in", "手机号", "password", "wechat", "qq"]
+        )
+
+    def _is_blocked_interaction_node(self, node: Dict[str, Any]) -> bool:
+        normalized_text = str(node.get("normalized_text") or "").strip().lower()
+        return any(keyword.lower() in normalized_text for keyword in self.BLOCKED_INTERACTION_KEYWORDS)
+
+    def _is_interaction_candidate(self, node: Dict[str, Any], screen: Optional[Dict[str, int]] = None) -> bool:
+        bounds = node.get("bounds") or {}
+        screen = screen or self._get_screen_size()
+        center_y = int(bounds.get("center_y", 0))
+        center_x = int(bounds.get("center_x", 0))
+        width = int(bounds.get("width", 0))
+        height = int(bounds.get("height", 0))
+        if node.get("is_system_dialog"):
+            return False
+        if self._is_blocked_interaction_node(node):
+            return False
+        if width < 32 or height < 32:
+            return False
+        if center_y <= int(screen["height"] * 0.18) or center_y >= int(screen["height"] * 0.84):
+            return False
+        if center_x <= int(screen["width"] * 0.08) or center_x >= int(screen["width"] * 0.92):
+            return False
+        return True
+
+    @staticmethod
+    def _normalized_node_text(node: Dict[str, Any]) -> str:
+        return str(node.get("normalized_text") or "").strip()
+
+    def _is_negative_action_node(self, node: Dict[str, Any]) -> bool:
+        normalized_text = self._normalized_node_text(node)
+        lowered_text = normalized_text.lower()
+        resource_id = str(node.get("resource_id") or "").strip().lower()
+        if any(hint in resource_id for hint in self.PERMISSION_DENY_RESOURCE_HINTS):
+            return True
+        if any(keyword in normalized_text for keyword in self.NEGATIVE_ACTION_KEYWORDS):
+            return True
+        return any(keyword in lowered_text for keyword in ["deny", "disagree", "forbid", "cancel", "decline"])
+
+    def _is_dismiss_action_node(self, node: Dict[str, Any]) -> bool:
+        normalized_text = self._normalized_node_text(node)
+        lowered_text = normalized_text.lower()
+        if any(keyword in normalized_text for keyword in self.DISMISS_ACTION_KEYWORDS):
+            return True
+        return any(keyword in lowered_text for keyword in ["skip", "close", "later", "not now", "got it"])
+
+    def _is_permission_allow_node(self, node: Dict[str, Any]) -> bool:
+        normalized_text = self._normalized_node_text(node)
+        lowered_text = normalized_text.lower()
+        resource_id = str(node.get("resource_id") or "").strip().lower()
+        if any(hint in resource_id for hint in self.PERMISSION_ALLOW_RESOURCE_HINTS):
+            return True
+        if any(keyword in normalized_text for keyword in self.SAFE_ACTION_KEYWORDS):
+            return True
+        return any(
+            keyword in lowered_text
+            for keyword in [
+                "allow",
+                "grant",
+                "agree",
+                "confirm",
+                "continue",
+                "ok",
+                "while using",
+                "only this time",
+                "one time",
+                "always allow",
+            ]
+        )
+
+    def _permission_allow_rank(self, node: Dict[str, Any]) -> int:
+        normalized_text = self._normalized_node_text(node)
+        lowered_text = normalized_text.lower()
+        resource_id = str(node.get("resource_id") or "").strip().lower()
+        rank_rules = [
+            ("permission_allow_always_button", 0),
+            ("始终允许", 0),
+            ("总是允许", 0),
+            ("always allow", 0),
+            ("permission_allow_foreground_only_button", 1),
+            ("仅在使用中", 1),
+            ("仅在使用期间", 1),
+            ("使用期间", 1),
+            ("while using", 1),
+            ("permission_allow_one_time_button", 2),
+            ("仅此一次", 2),
+            ("本次允许", 2),
+            ("only this time", 2),
+            ("one time", 2),
+            ("permission_allow_button", 3),
+            ("permission_allow_selected_button", 3),
+            ("允许", 3),
+            ("同意", 3),
+            ("确认", 3),
+            ("继续", 3),
+            ("grant", 3),
+            ("allow", 3),
+        ]
+        for pattern, rank in rank_rules:
+            if pattern in resource_id or pattern in normalized_text or pattern in lowered_text:
+                return rank
+        return 10
+
+    def _is_general_positive_action_node(self, node: Dict[str, Any]) -> bool:
+        if self._is_negative_action_node(node) or self._is_dismiss_action_node(node):
+            return False
+        normalized_text = self._normalized_node_text(node)
+        lowered_text = normalized_text.lower()
+        resource_id = str(node.get("resource_id") or "").strip().lower()
+        if any(keyword in normalized_text for keyword in self.SAFE_ACTION_KEYWORDS):
+            return True
+        if resource_id.endswith(":id/button1") or resource_id.endswith("/button1"):
+            return True
+        return any(keyword in lowered_text for keyword in ["allow", "agree", "confirm", "continue", "next", "enter", "open", "start", "grant"])
+
+    def _select_safe_action_candidate(self, snapshot: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        clickable_nodes = snapshot.get("clickable_nodes", []) or []
+        if not clickable_nodes:
+            return None
+
+        system_dialog_nodes = [node for node in clickable_nodes if node.get("is_system_dialog")]
+        target_nodes = system_dialog_nodes if system_dialog_nodes else clickable_nodes
+
+        permission_allow_nodes = [
+            node
+            for node in target_nodes
+            if self._is_permission_allow_node(node) and not self._is_negative_action_node(node)
+        ]
+        if permission_allow_nodes:
+            return sorted(
+                permission_allow_nodes,
+                key=lambda node: (
+                    0 if node.get("is_system_dialog") else 1,
+                    self._permission_allow_rank(node),
+                    -int((node.get("bounds") or {}).get("center_x", 0)),
+                    -int((node.get("bounds") or {}).get("center_y", 0)),
+                ),
+            )[0]
+
+        general_positive_nodes = [
+            node
+            for node in target_nodes
+            if self._is_general_positive_action_node(node)
+        ]
+        if general_positive_nodes:
+            return sorted(
+                general_positive_nodes,
+                key=lambda node: (
+                    0 if node.get("is_system_dialog") else 1,
+                    -int((node.get("bounds") or {}).get("center_x", 0)),
+                    -int((node.get("bounds") or {}).get("center_y", 0)),
+                ),
+            )[0]
+
+        if system_dialog_nodes:
+            return None
+
+        dismiss_nodes = [
+            node
+            for node in target_nodes
+            if self._is_dismiss_action_node(node) and not self._is_negative_action_node(node)
+        ]
+        if dismiss_nodes:
+            return sorted(
+                dismiss_nodes,
+                key=lambda node: (
+                    -int((node.get("bounds") or {}).get("center_y", 0)),
+                    -int((node.get("bounds") or {}).get("center_x", 0)),
+                ),
+            )[0]
+        return None
+
+    def _get_interaction_candidates(self, snapshot: Dict[str, Any]) -> List[Dict[str, Any]]:
+        screen = self._get_screen_size()
+        return [
+            node
+            for node in (snapshot.get("clickable_nodes", []) or [])
+            if self._is_interaction_candidate(node, screen=screen)
+        ]
+
+    def _tap_absolute(
+        self,
+        x: int,
+        y: int,
+        settle_seconds: float = 1.0,
+        allow_system_dialogs: bool = False,
+    ) -> bool:
+        if not self._is_controlled_foreground(allow_system_dialogs=allow_system_dialogs):
+            return False
+        self._run_adb_command(["shell", "input", "tap", str(int(x)), str(int(y))], timeout=10, quiet=True)
+        time.sleep(max(0.1, float(settle_seconds)))
+        return self._is_controlled_foreground(allow_system_dialogs=allow_system_dialogs)
+
+    def _tap_node(
+        self,
+        node: Dict[str, Any],
+        settle_seconds: float = 1.0,
+        allow_system_dialogs: bool = False,
+    ) -> bool:
+        bounds = node.get("bounds") or {}
+        return self._tap_absolute(
+            bounds.get("center_x", 0),
+            bounds.get("center_y", 0),
+            settle_seconds=settle_seconds,
+            allow_system_dialogs=allow_system_dialogs,
+        )
+
+    def _handle_safe_actions(self, max_actions: int = 3) -> int:
+        if not self._is_controlled_foreground(allow_system_dialogs=True):
+            return 0
+        handled = 0
+        for _ in range(max(1, int(max_actions))):
+            snapshot = self._dump_ui_snapshot(include_system_dialogs=True)
+            candidate = self._select_safe_action_candidate(snapshot)
+            if not candidate:
+                break
+            if not self._tap_node(candidate, settle_seconds=0.8, allow_system_dialogs=True):
+                break
+            handled += 1
+        return handled
+
+    @staticmethod
+    def _node_action_key(node: Dict[str, Any]) -> str:
+        bounds = node.get("bounds") or {}
+        return "|".join(
+            [
+                str(node.get("resource_id") or ""),
+                str(node.get("text") or ""),
+                str(node.get("content_desc") or ""),
+                str(bounds.get("center_x", 0)),
+                str(bounds.get("center_y", 0)),
+            ]
+        )
+
+    def _swipe_screen(
+        self,
+        start_x: int,
+        start_y: int,
+        end_x: int,
+        end_y: int,
+        duration_ms: int = 320,
+    ) -> bool:
+        if not self._is_target_foreground():
+            return False
+        self._run_adb_command(
+            [
+                "shell",
+                "input",
+                "swipe",
+                str(int(start_x)),
+                str(int(start_y)),
+                str(int(end_x)),
+                str(int(end_y)),
+                str(max(120, int(duration_ms))),
+            ],
+            timeout=10,
+            quiet=True,
+        )
+        time.sleep(0.9)
+        return self._is_target_foreground()
+
+    def _run_guided_interaction_loop(
+        self,
+        duration_seconds: int = 8,
+        allow_monkey_fallback: bool = False,
+        monkey_event_count: int = 10,
+        monkey_throttle_ms: int = 150,
+    ) -> int:
+        if not self.package_name:
+            return 0
+
+        loop_seconds = max(2, int(duration_seconds))
+        deadline = time.time() + loop_seconds
+        screen = self._get_screen_size()
+        seen_targets = set()
+        actions = 0
+        round_index = 0
+
+        while time.time() < deadline:
+            if not self._is_controlled_foreground(allow_system_dialogs=True):
+                if not self.start_app(force_launch=False):
+                    time.sleep(0.8)
+                    continue
+
+            actions += self._handle_safe_actions(max_actions=2)
+            snapshot = self._dump_ui_snapshot(include_system_dialogs=True)
+
+            if self._has_loading_marker(snapshot) and not self._get_interaction_candidates(snapshot):
+                self._keep_app_foreground(dwell_seconds=min(2, max(1, int(deadline - time.time()))))
+                round_index += 1
+                continue
+
+            tapped_this_round = 0
+            candidates = sorted(
+                self._get_interaction_candidates(snapshot),
+                key=lambda node: (
+                    -int((node.get("bounds") or {}).get("center_y", 0)),
+                    abs(int((node.get("bounds") or {}).get("center_x", 0)) - int(screen["width"] * 0.5)),
+                ),
+            )
+            for node in candidates:
+                if time.time() >= deadline:
+                    break
+                action_key = self._node_action_key(node)
+                if action_key in seen_targets:
+                    continue
+                if self._tap_node(node, settle_seconds=0.8):
+                    seen_targets.add(action_key)
+                    actions += 1
+                    tapped_this_round += 1
+                    actions += self._handle_safe_actions(max_actions=1)
+                if tapped_this_round >= 3:
+                    break
+
+            if time.time() >= deadline:
+                break
+
+            if self._is_target_foreground():
+                if round_index % 2 == 0:
+                    if self._swipe_screen(
+                        int(screen["width"] * 0.50),
+                        int(screen["height"] * 0.78),
+                        int(screen["width"] * 0.50),
+                        int(screen["height"] * 0.34),
+                        duration_ms=360,
+                    ):
+                        actions += 1
+                else:
+                    if self._swipe_screen(
+                        int(screen["width"] * 0.78),
+                        int(screen["height"] * 0.56),
+                        int(screen["width"] * 0.22),
+                        int(screen["height"] * 0.56),
+                        duration_ms=280,
+                    ):
+                        actions += 1
+                actions += self._handle_safe_actions(max_actions=1)
+
+            if (
+                tapped_this_round == 0
+                and allow_monkey_fallback
+                and self._is_target_foreground()
+                and not self._should_avoid_aggressive_navigation()
+                and time.time() + 3 < deadline
+            ):
+                if self.run_monkey_burst(
+                    event_count=max(6, int(monkey_event_count)),
+                    throttle_ms=max(120, int(monkey_throttle_ms)),
+                ):
+                    actions += 1
+                    actions += self._handle_safe_actions(max_actions=1)
+
+            round_index += 1
+
+        return actions
+
+    def _is_snapshot_ready(self, snapshot: Dict[str, Any]) -> bool:
+        nodes = snapshot.get("nodes", []) or []
+        texts = snapshot.get("texts", []) or []
+        interactive_nodes = self._get_interaction_candidates(snapshot)
+        if len(nodes) < 4:
+            return False
+        if self._has_loading_marker(snapshot) and not interactive_nodes:
+            return False
+        return bool(interactive_nodes) or len(texts) >= 3
+
+    def _should_avoid_aggressive_navigation(self, snapshot: Optional[Dict[str, Any]] = None) -> bool:
+        snapshot = snapshot or self._dump_ui_snapshot()
+        return self._detect_login_gate(snapshot) or self._has_loading_marker(snapshot)
+
+    def _keep_app_foreground(self, dwell_seconds: int = 6) -> bool:
+        if not self.package_name:
+            return False
+        deadline = time.time() + max(1, int(dwell_seconds))
+        while time.time() < deadline:
+            if not self._is_controlled_foreground(allow_system_dialogs=True):
+                if not self.start_app(force_launch=False):
+                    time.sleep(1)
+                    continue
+            self._handle_safe_actions(max_actions=2)
+            time.sleep(1)
+        return self._is_app_running()
+
+    def _wait_for_app_ready(self, max_wait_seconds: int = 45) -> bool:
+        if not self.package_name:
+            return False
+        wait_budget = self._step_budget(max_wait_seconds, minimum_seconds=3)
+        if wait_budget <= 0:
+            return self._is_app_running()
+        start_time = time.time()
+        while time.time() - start_time < wait_budget:
+            foreground_package = self._get_foreground_package()
+            if self._is_system_dialog_package(foreground_package):
+                self._handle_safe_actions(max_actions=2)
+                time.sleep(1.2)
+                continue
+            if foreground_package == self.package_name:
+                self._handle_safe_actions(max_actions=2)
+                snapshot = self._dump_ui_snapshot()
+                if self._is_snapshot_ready(snapshot):
+                    return True
+            elif self._is_app_running():
+                time.sleep(2)
+                continue
+            time.sleep(1.5)
+        return self._is_app_running()
+
+    def _launch_via_explicit_activity(self) -> bool:
+        component_name = self._build_launch_component()
+        if not component_name:
+            return False
+        output = self._run_adb_command(
+            ["shell", "am", "start", "-S", "-W", "-n", component_name],
+            timeout=35,
+            quiet=True,
+        )
+        return output is not None
+
+    def _launch_via_monkey(self) -> bool:
+        if not self.package_name:
+            return False
+        output = self._run_adb_command(
+            ["shell", "monkey", "-p", self.package_name, "-c", "android.intent.category.LAUNCHER", "1"],
+            timeout=30,
+            quiet=True,
+        )
+        return output is not None
+
+    def start_app(self, force_launch: bool = True) -> bool:
+        if not self.package_name:
+            return False
+        self.last_launch_error = None
+        if not force_launch and self._is_target_foreground() and self._wait_for_app_ready(max_wait_seconds=12):
+            return True
+        if force_launch:
+            self._force_stop_app()
+
+        launch_plan = [
+            (self._launch_via_explicit_activity, 24 if force_launch else 12),
+            (self._launch_via_monkey, 30 if force_launch else 16),
+        ]
+        if not self.main_activity:
+            launch_plan = [(self._launch_via_monkey, 30 if force_launch else 16)]
+
+        for launch_func, wait_window in launch_plan:
+            if not launch_func():
+                continue
+            time.sleep(2.5)
+            wait_budget = self._step_budget(wait_window, minimum_seconds=6)
+            if wait_budget > 0 and self._wait_for_app_ready(max_wait_seconds=wait_budget):
+                self._refresh_app_pid()
+                self._handle_safe_actions(max_actions=3)
+                return True
+
+        self.last_launch_error = "app launch did not stabilize"
+        return self._is_app_running()
+
+    def _perform_basic_interactions(self) -> None:
+        if not self._is_target_foreground():
+            return
+        interaction_window = self._step_budget(8, minimum_seconds=3, reserve_seconds=36 if self.frida_analyzer else 12)
+        if interaction_window <= 0:
+            self._handle_safe_actions(max_actions=2)
+            return
+        self._run_guided_interaction_loop(
+            duration_seconds=interaction_window,
+            allow_monkey_fallback=True,
+            monkey_event_count=8,
+            monkey_throttle_ms=140,
+        )
+
+    def simulate_user_interactions(self) -> bool:
+        if not self.start_app(force_launch=False):
+            if not self.start_app(force_launch=True):
+                return False
+        self._handle_safe_actions(max_actions=3)
+        self._perform_basic_interactions()
+        if self._detect_login_gate():
+            print("[dynamic] login gate detected, keep app on foreground for extended probing")
+            dwell_seconds = self._step_budget(8, minimum_seconds=3, reserve_seconds=28 if self.frida_analyzer else 8)
+            if dwell_seconds > 0:
+                self._keep_app_foreground(dwell_seconds=dwell_seconds)
+        self._handle_safe_actions(max_actions=2)
+        return True
+
+    def run_monkey_burst(self, event_count: int = 80, throttle_ms: int = 180) -> bool:
+        if not self.package_name:
+            return False
+        if self._detect_login_gate():
+            print("[dynamic] login gate detected, skip monkey burst")
+            self._keep_app_foreground(dwell_seconds=5)
+            return False
         print(f"run monkey burst for {event_count} events")
-        timeout = max(90, int((event_count * throttle_ms) / 1000) + 45)
+        timeout = max(55, int((event_count * throttle_ms) / 1000) + 28)
         command = [
             "shell",
             "monkey",
             "-p",
             self.package_name,
             "--ignore-crashes",
+            "--ignore-native-crashes",
             "--ignore-timeouts",
             "--ignore-security-exceptions",
+            "--pct-touch",
+            "55",
+            "--pct-motion",
+            "18",
+            "--pct-nav",
+            "12",
+            "--pct-majornav",
+            "3",
+            "--pct-appswitch",
+            "0",
+            "--pct-anyevent",
+            "0",
             "--pct-syskeys",
             "0",
             "--throttle",
@@ -285,26 +1456,115 @@ class DynamicAnalyzer:
             "-v",
             str(event_count),
         ]
-        output = self._run_adb_command(command, timeout=timeout)
+        output = self._run_adb_command(command, timeout=timeout, quiet=True)
         return output is not None
 
+    def _warm_up_app_process(self) -> None:
+        if not self.start_app(force_launch=False):
+            self.start_app(force_launch=True)
+        self._refresh_app_pid()
+        self._handle_safe_actions(max_actions=2)
+        self._perform_basic_interactions()
+
     def exercise_app_under_frida(self) -> bool:
-        self.simulate_user_interactions()
-        self.run_monkey_burst()
-        time.sleep(2)
-        self.simulate_user_interactions()
+        self._warm_up_app_process()
+        if self._should_avoid_aggressive_navigation():
+            dwell_seconds = self._step_budget(8, minimum_seconds=3, reserve_seconds=16)
+            if dwell_seconds > 0:
+                self._keep_app_foreground(dwell_seconds=dwell_seconds)
+        else:
+            interaction_window = self._step_budget(12, minimum_seconds=4, reserve_seconds=14)
+            if interaction_window > 0:
+                self._run_guided_interaction_loop(
+                    duration_seconds=interaction_window,
+                    allow_monkey_fallback=True,
+                    monkey_event_count=12,
+                    monkey_throttle_ms=150,
+                )
+        self._warm_up_app_process()
         return True
 
-    def monitor_sensitive_api_calls(self, duration: int = 60) -> Dict[str, Dict[str, Any]]:
+    def _exercise_cold_start_under_frida(self) -> bool:
+        if not self.start_app(force_launch=True):
+            return False
+        self._handle_safe_actions(max_actions=3)
+        primary_window = self._step_budget(8, minimum_seconds=4, reserve_seconds=14)
+        if primary_window > 0:
+            self._run_guided_interaction_loop(
+                duration_seconds=primary_window,
+                allow_monkey_fallback=False,
+            )
+        if self._should_avoid_aggressive_navigation():
+            dwell_seconds = self._step_budget(5, minimum_seconds=2, reserve_seconds=10)
+            if dwell_seconds > 0:
+                self._keep_app_foreground(dwell_seconds=dwell_seconds)
+        else:
+            secondary_window = self._step_budget(6, minimum_seconds=3, reserve_seconds=8)
+            if secondary_window > 0:
+                self._run_guided_interaction_loop(
+                    duration_seconds=secondary_window,
+                    allow_monkey_fallback=True,
+                    monkey_event_count=8,
+                    monkey_throttle_ms=160,
+                )
+        return True
+
+    def _exercise_recovery_under_frida(self) -> bool:
+        if not self.start_app(force_launch=True):
+            return False
+        self._handle_safe_actions(max_actions=3)
+        if self._should_avoid_aggressive_navigation():
+            dwell_seconds = self._step_budget(6, minimum_seconds=2, reserve_seconds=8)
+            if dwell_seconds > 0:
+                self._keep_app_foreground(dwell_seconds=dwell_seconds)
+        else:
+            recovery_window = self._step_budget(9, minimum_seconds=4, reserve_seconds=8)
+            if recovery_window > 0:
+                self._run_guided_interaction_loop(
+                    duration_seconds=recovery_window,
+                    allow_monkey_fallback=True,
+                    monkey_event_count=10,
+                    monkey_throttle_ms=150,
+                )
+        self._perform_basic_interactions()
+        return True
+
+    def _exercise_runtime_probe(self) -> bool:
+        if not self.start_app(force_launch=False):
+            return False
+        self._handle_safe_actions(max_actions=2)
+        primary_window = self._step_budget(8, minimum_seconds=4, reserve_seconds=12 if self.frida_analyzer else 4)
+        if primary_window > 0:
+            self._run_guided_interaction_loop(
+                duration_seconds=primary_window,
+                allow_monkey_fallback=True,
+                monkey_event_count=8,
+                monkey_throttle_ms=150,
+            )
+        if self._should_avoid_aggressive_navigation():
+            dwell_seconds = self._step_budget(4, minimum_seconds=2, reserve_seconds=8)
+            if dwell_seconds > 0:
+                self._keep_app_foreground(dwell_seconds=dwell_seconds)
+        else:
+            secondary_window = self._step_budget(5, minimum_seconds=3, reserve_seconds=6)
+            if secondary_window > 0:
+                self._run_guided_interaction_loop(
+                    duration_seconds=secondary_window,
+                    allow_monkey_fallback=True,
+                    monkey_event_count=6,
+                    monkey_throttle_ms=140,
+                )
+        return True
+
+    def monitor_sensitive_api_calls(
+        self,
+        duration: int = 60,
+        exercise_callback: Optional[Any] = None,
+    ) -> Dict[str, Dict[str, Any]]:
         print(f"monitoring logcat sensitive APIs for {duration}s")
-        self._run_adb_command(["logcat", "-c"])
-        process = subprocess.Popen(
-            [self.adb_path, "logcat"],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-        )
-        start_time = time.time()
+        self._run_adb_command(["logcat", "-c"], quiet=True)
         detected_apis: Dict[str, Dict[str, Any]] = {}
+        probe_thread: Optional[threading.Thread] = None
         patterns = {
             "getDeviceId": ["getdeviceid", "getimei", "imei", "meid", "getserial"],
             "getSubscriberId": ["getsubscriberid", "imsi", "simserial", "line1number"],
@@ -327,40 +1587,40 @@ class DynamicAnalyzer:
         noisy_patterns = ["runtimeinit$methodandargscaller.run", "system.err", "zygoteinit"]
 
         try:
+            if exercise_callback is not None:
+                probe_thread = threading.Thread(target=exercise_callback, daemon=True)
+                probe_thread.start()
             with tqdm(total=duration, desc="monitor sensitive APIs", unit="s") as progress:
-                while time.time() - start_time < duration:
-                    raw_line = process.stdout.readline()
-                    if not raw_line:
-                        time.sleep(0.1)
-                        continue
-                    try:
-                        line = raw_line.decode("utf-8")
-                    except UnicodeDecodeError:
-                        line = raw_line.decode("gbk", errors="replace")
-                    normalized_line = line.strip()
-                    lower_line = normalized_line.lower()
-                    if not normalized_line or any(pattern in lower_line for pattern in noisy_patterns):
-                        continue
-                    for api, api_patterns in patterns.items():
-                        if not any(pattern in lower_line for pattern in api_patterns):
-                            continue
-                        entry = detected_apis.setdefault(
-                            api,
-                            {"description": self.sensitive_apis.get(api, api), "count": 0, "logs": []},
-                        )
-                        entry["count"] += 1
-                        if normalized_line not in entry["logs"] and len(entry["logs"]) < 20:
-                            entry["logs"].append(normalized_line)
-                        self.monitoring_logs.append(normalized_line)
-                        break
-                    progress.n = min(duration, int(time.time() - start_time))
-                    progress.refresh()
+                for _ in range(max(1, int(duration))):
+                    time.sleep(1)
+                    progress.update(1)
         finally:
-            process.terminate()
-            try:
-                process.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                process.kill()
+            if probe_thread is not None and probe_thread.is_alive():
+                probe_thread.join(timeout=5)
+
+        dump_command = ["logcat", "-d"]
+        active_pid = self._refresh_app_pid()
+        if active_pid:
+            dump_command.extend(["--pid", str(active_pid)])
+        log_dump = self._run_adb_command(dump_command, timeout=20, quiet=True) or ""
+
+        for line in log_dump.splitlines():
+            normalized_line = str(line or "").strip()
+            lower_line = normalized_line.lower()
+            if not normalized_line or any(pattern in lower_line for pattern in noisy_patterns):
+                continue
+            for api, api_patterns in patterns.items():
+                if not any(pattern in lower_line for pattern in api_patterns):
+                    continue
+                entry = detected_apis.setdefault(
+                    api,
+                    {"description": self.sensitive_apis.get(api, api), "count": 0, "logs": []},
+                )
+                entry["count"] += 1
+                if normalized_line not in entry["logs"] and len(entry["logs"]) < 20:
+                    entry["logs"].append(normalized_line)
+                self.monitoring_logs.append(normalized_line)
+                break
 
         return detected_apis
 
@@ -467,25 +1727,32 @@ class DynamicAnalyzer:
         return False
 
     def _manual_guided_probe(self) -> bool:
-        if self.manual_probe_seconds <= 0:
+        probe_window = self._step_budget(self.manual_probe_seconds, minimum_seconds=0, reserve_seconds=2)
+        if probe_window <= 0:
             return True
 
         print(
-            f"[Frida][Manual] low coverage detected, manual interaction window: {self.manual_probe_seconds}s"
+            f"[Frida][Manual] low coverage detected, manual interaction window: {probe_window}s"
         )
         print("[Frida][Manual] please grant permissions / login / navigate sensitive pages in emulator now")
 
         started_at = time.time()
         last_reported = -1
-        while time.time() - started_at < self.manual_probe_seconds:
-            remaining = max(0, self.manual_probe_seconds - int(time.time() - started_at))
+        while time.time() - started_at < probe_window:
+            if not self._is_controlled_foreground(allow_system_dialogs=True):
+                self.start_app(force_launch=False)
+            self._handle_safe_actions(max_actions=2)
+            snapshot = self._dump_ui_snapshot(include_system_dialogs=True)
+            if self._detect_login_gate(snapshot):
+                print("[Frida][Manual] login page detected, complete login or SMS verification now")
+            remaining = max(0, probe_window - int(time.time() - started_at))
             if remaining != last_reported and (remaining % 10 == 0 or remaining <= 5):
                 print(f"[Frida][Manual] remaining: {remaining}s")
                 last_reported = remaining
             time.sleep(1)
 
         print("[Frida][Manual] manual interaction window finished, run a short monkey burst")
-        self.run_monkey_burst(event_count=40, throttle_ms=150)
+        self.run_monkey_burst(event_count=30, throttle_ms=150)
         return True
 
     @staticmethod
@@ -499,6 +1766,97 @@ class DynamicAnalyzer:
             seen.add(text)
             merged.append(text)
         return merged
+
+    def _classify_frida_payload(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        results = payload.get("results", {}) or {}
+        summary = payload.get("summary", {}) or {}
+
+        status_messages = self._merge_unique_text(
+            list(results.get("status_messages", []) or []) + list(summary.get("status_messages", []) or [])
+        )
+        error_messages = self._merge_unique_text(
+            list(results.get("errors", []) or []) + list(summary.get("error_messages", []) or [])
+        )
+        detached_events = self._merge_unique_text(
+            list(results.get("detached_events", []) or []) + list(summary.get("detached_events", []) or [])
+        )
+        issue_messages = self._merge_unique_text(error_messages + detached_events)
+
+        status_blob = "\n".join(str(item) for item in status_messages).lower()
+        issue_blob = "\n".join(str(item) for item in issue_messages).lower()
+
+        total_api_calls = int(summary.get("total_api_calls") or len(results.get("call_logs", []) or []))
+        java_bridge_ready = bool(summary.get("java_bridge_ready")) or "java bridge ready" in status_blob
+        java_hook_ready = bool(summary.get("java_hook_ready")) or "sensitive api hooks ready" in status_blob
+        process_terminated = bool(summary.get("process_terminated")) or "process-terminated" in issue_blob
+        session_detached = bool(summary.get("session_detached")) or "session detached:" in issue_blob
+
+        warning_messages: List[str] = []
+        hard_errors: List[str] = []
+        for message in error_messages:
+            lowered = str(message).lower()
+            if java_hook_ready and "session detached:" in lowered:
+                warning_messages.append(message)
+                continue
+            hard_errors.append(message)
+
+        if java_hook_ready and session_detached and not warning_messages:
+            if detached_events:
+                warning_messages.append(detached_events[0])
+            else:
+                warning_messages.append("session detached: reason=unknown")
+
+        if total_api_calls > 0:
+            state = "captured"
+        elif java_hook_ready and session_detached:
+            state = "runtime_interrupted"
+        elif java_hook_ready:
+            state = "ready_no_hits"
+        elif hard_errors or payload.get("error"):
+            state = "startup_failed"
+        elif java_bridge_ready:
+            state = "bridge_ready_only"
+        else:
+            state = "startup_incomplete"
+
+        results["status_messages"] = status_messages
+        results["errors"] = hard_errors
+        if detached_events:
+            results["detached_events"] = detached_events
+        if warning_messages:
+            results["warnings"] = warning_messages
+
+        summary["status_messages"] = status_messages[:30]
+        summary["error_messages"] = hard_errors[:30]
+        summary["detached_events"] = detached_events[:10]
+        summary["warning_messages"] = warning_messages[:30]
+        summary["java_bridge_ready"] = java_bridge_ready
+        summary["java_hook_ready"] = java_hook_ready
+        summary["process_terminated"] = process_terminated
+        summary["session_detached"] = session_detached
+
+        payload["results"] = results
+        payload["summary"] = summary
+        payload["state"] = state
+
+        if state == "runtime_interrupted":
+            payload["warning"] = "Java Hook 已就绪，但目标进程在运行中退出"
+            payload.pop("error", None)
+        elif state == "ready_no_hits":
+            payload["warning"] = "Java Hook 已就绪，但当前探测窗口未捕获到敏感 API 调用"
+            payload.pop("error", None)
+        elif state == "captured":
+            payload.pop("error", None)
+            if session_detached and warning_messages:
+                payload["warning"] = warning_messages[0]
+            else:
+                payload.pop("warning", None)
+        else:
+            payload.pop("warning", None)
+            if not payload.get("error") and hard_errors:
+                payload["error"] = hard_errors[0]
+
+        return payload
 
     def _aggregate_frida_call_logs(self, call_logs: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         grouped: Dict[str, Dict[str, Any]] = {}
@@ -555,6 +1913,13 @@ class DynamicAnalyzer:
             for key, value in source.items():
                 category_counts[str(key)] = category_counts.get(str(key), 0) + int(value or 0)
 
+        detached_events = self._merge_unique_text(
+            list(first_results.get("detached_events", []) or [])
+            + list(second_results.get("detached_events", []) or [])
+            + list(first_summary.get("detached_events", []) or [])
+            + list(second_summary.get("detached_events", []) or [])
+        )
+
         aggregated_calls = self._aggregate_frida_call_logs(call_logs)
         merged_duration = round(
             float(first_results.get("duration") or first_summary.get("duration") or 0.0)
@@ -571,6 +1936,7 @@ class DynamicAnalyzer:
             "category_counts": category_counts,
             "aggregated_calls": aggregated_calls,
             "status_messages": status_messages,
+            "detached_events": detached_events,
         }
         merged_summary = {
             "total_hooked_apis": len(hooked_apis),
@@ -585,6 +1951,10 @@ class DynamicAnalyzer:
             "aggregated_calls": aggregated_calls[:30],
             "status_messages": status_messages[:30],
             "error_messages": errors[:30],
+            "detached_events": detached_events[:10],
+            "java_bridge_ready": any("java bridge ready" in item.lower() for item in status_messages),
+            "java_hook_ready": any("sensitive api hooks ready" in item.lower() for item in status_messages),
+            "process_terminated": any("process-terminated" in item.lower() for item in errors + detached_events),
         }
         merged_payload: Dict[str, Any] = {
             "results": merged_results,
@@ -598,7 +1968,63 @@ class DynamicAnalyzer:
         }
         if errors and not merged_summary["total_api_calls"]:
             merged_payload["error"] = errors[0]
-        return merged_payload
+        return self._classify_frida_payload(merged_payload)
+
+    def _run_frida_pass(
+        self,
+        label: str,
+        duration: int,
+        probe_callback: Optional[Any],
+        spawn_first: bool,
+    ) -> Dict[str, Any]:
+        last_payload: Dict[str, Any] = {
+            "results": {},
+            "summary": {},
+            "pass_label": label,
+        }
+        for attempt_index in range(2):
+            if spawn_first:
+                self._force_stop_app()
+                time.sleep(2)
+            else:
+                self._warm_up_app_process()
+                if not self._get_preferred_app_pids():
+                    print(f"[Frida] {label} pass detected no stable app pid, relaunch before attach")
+                    self.start_app(force_launch=True)
+                    self._refresh_app_pid()
+                time.sleep(1)
+
+            pass_results = self.frida_analyzer.perform_frida_analysis(
+                duration=max(15, int(duration)),
+                probe_callback=probe_callback,
+                spawn_first=spawn_first,
+            )
+            pass_summary = self.frida_analyzer.get_frida_summary()
+            payload: Dict[str, Any] = {
+                "results": pass_results,
+                "summary": pass_summary,
+                "pass_label": label,
+            }
+            if pass_results.get("error"):
+                payload["error"] = pass_results["error"]
+            elif pass_summary.get("error_messages") and not pass_summary.get("total_api_calls"):
+                payload["error"] = pass_summary["error_messages"][0]
+            payload = self._classify_frida_payload(payload)
+            last_payload = payload
+
+            detached_after_ready = payload.get("state") == "runtime_interrupted"
+            if (
+                not detached_after_ready
+                or attempt_index >= 1
+                or not self._has_analysis_budget(minimum_seconds=max(8, int(duration / 2)), reserve_seconds=4)
+            ):
+                return payload
+
+            print(f"[Frida] {label} pass detached after hooks were ready, retry same pass once")
+            self.cleanup_runtime_state()
+            time.sleep(2)
+
+        return last_payload
 
     def _perform_frida_analysis(self) -> Dict[str, Any]:
         print("start Frida runtime analysis")
@@ -606,50 +2032,127 @@ class DynamicAnalyzer:
             return {"error": "package name is unknown"}
         if not self.frida_analyzer:
             return {"error": "Frida module is unavailable"}
-        if not self._is_app_running():
-            self.start_app()
-            time.sleep(3)
         try:
-            first_results = self.frida_analyzer.perform_frida_analysis(
-                duration=60,
-                probe_callback=self.exercise_app_under_frida,
-            )
-            first_summary = self.frida_analyzer.get_frida_summary()
-            first_payload: Dict[str, Any] = {"results": first_results, "summary": first_summary}
-            if first_results.get("error"):
-                first_payload["error"] = first_results["error"]
-            elif first_summary.get("error_messages") and not first_summary.get("total_api_calls"):
-                first_payload["error"] = first_summary["error_messages"][0]
+            remaining_budget = self._remaining_analysis_budget()
+            compact_mode = remaining_budget is not None and remaining_budget <= 64
+
+            executed_labels: List[str] = []
+            cold_duration = self._step_budget(14 if compact_mode else 18, minimum_seconds=10, reserve_seconds=24)
+            warm_duration = self._step_budget(18 if compact_mode else 22, minimum_seconds=12, reserve_seconds=12)
+
+            cold_start_payload: Optional[Dict[str, Any]] = None
+            if cold_duration > 0:
+                cold_start_payload = self._run_frida_pass(
+                    label="cold_start",
+                    duration=cold_duration,
+                    probe_callback=self._exercise_cold_start_under_frida,
+                    spawn_first=True,
+                )
+                executed_labels.append("cold_start")
+
+            warm_interaction_payload: Optional[Dict[str, Any]] = None
+            if warm_duration > 0:
+                warm_interaction_payload = self._run_frida_pass(
+                    label="warm_interaction",
+                    duration=warm_duration,
+                    probe_callback=self.exercise_app_under_frida,
+                    spawn_first=False,
+                )
+                executed_labels.append("warm_interaction")
+
+            if cold_start_payload and warm_interaction_payload:
+                merged_payload = self._merge_frida_payload(cold_start_payload, warm_interaction_payload)
+            elif warm_interaction_payload:
+                merged_payload = warm_interaction_payload
+            elif cold_start_payload:
+                merged_payload = cold_start_payload
+            else:
+                return {"error": "analysis budget exhausted before Frida probe"}
+
+            merged_payload["adaptive_probe"] = {
+                "enabled": True,
+                "manual_probe_seconds": self.manual_probe_seconds,
+                "low_coverage_api_threshold": self.low_coverage_api_threshold,
+                "pass_count": len(executed_labels),
+                "pass_labels": executed_labels[:],
+                "budget_mode": "compact" if compact_mode else "standard",
+                "pass_durations": {
+                    "cold_start": cold_duration,
+                    "warm_interaction": warm_duration,
+                },
+                "triggered_manual_probe": False,
+                "triggered_recovery_probe": False,
+            }
+
+            if self._is_low_coverage_frida(merged_payload.get("summary", {})):
+                recovery_duration = self._step_budget(12 if compact_mode else 16, minimum_seconds=10, reserve_seconds=6)
+            else:
+                recovery_duration = 0
+
+            if recovery_duration > 0 and self._is_low_coverage_frida(merged_payload.get("summary", {})):
+                print("[Frida] low coverage detected, starting recovery spawn pass")
+                recovery_payload = self._run_frida_pass(
+                    label="recovery_spawn",
+                    duration=recovery_duration,
+                    probe_callback=self._exercise_recovery_under_frida,
+                    spawn_first=True,
+                )
+                merged_payload = self._merge_frida_payload(merged_payload, recovery_payload)
+                executed_labels.append("recovery_spawn")
+                merged_payload["adaptive_probe"] = {
+                    "enabled": True,
+                    "manual_probe_seconds": self.manual_probe_seconds,
+                    "low_coverage_api_threshold": self.low_coverage_api_threshold,
+                    "pass_count": len(executed_labels),
+                    "pass_labels": executed_labels[:],
+                    "budget_mode": "compact" if compact_mode else "standard",
+                    "pass_durations": {
+                        "cold_start": cold_duration,
+                        "warm_interaction": warm_duration,
+                        "recovery_spawn": recovery_duration,
+                    },
+                    "triggered_manual_probe": False,
+                    "triggered_recovery_probe": True,
+                }
 
             should_run_manual_probe = (
                 self.manual_probe_seconds > 0
-                and self._is_low_coverage_frida(first_summary)
+                and self._is_low_coverage_frida(merged_payload.get("summary", {}))
+                and self._has_analysis_budget(minimum_seconds=24, reserve_seconds=4)
             )
-            if not should_run_manual_probe:
-                first_payload["adaptive_probe"] = {
-                    "enabled": self.manual_probe_seconds > 0,
+            if should_run_manual_probe:
+                manual_duration = self._step_budget(
+                    max(24, self.manual_probe_seconds + 8),
+                    minimum_seconds=20,
+                    reserve_seconds=4,
+                )
+                if manual_duration <= 0:
+                    return merged_payload
+                print("[Frida] low coverage persists, starting manual-guided pass")
+                manual_payload = self._run_frida_pass(
+                    label="manual_guided",
+                    duration=manual_duration,
+                    probe_callback=self._manual_guided_probe,
+                    spawn_first=False,
+                )
+                merged_payload = self._merge_frida_payload(merged_payload, manual_payload)
+                executed_labels.append("manual_guided")
+                merged_payload["adaptive_probe"] = {
+                    "enabled": True,
                     "manual_probe_seconds": self.manual_probe_seconds,
                     "low_coverage_api_threshold": self.low_coverage_api_threshold,
-                    "pass_count": 1,
-                    "triggered_manual_probe": False,
+                    "pass_count": len(executed_labels),
+                    "pass_labels": executed_labels[:],
+                    "budget_mode": "compact" if compact_mode else "standard",
+                    "pass_durations": {
+                        "cold_start": cold_duration,
+                        "warm_interaction": warm_duration,
+                        "recovery_spawn": recovery_duration,
+                        "manual_guided": manual_duration,
+                    },
+                    "triggered_manual_probe": True,
+                    "triggered_recovery_probe": "recovery_spawn" in executed_labels,
                 }
-                return first_payload
-
-            print("[Frida] low coverage detected, starting manual-guided second pass")
-            second_duration = max(60, self.manual_probe_seconds + 20)
-            second_results = self.frida_analyzer.perform_frida_analysis(
-                duration=second_duration,
-                probe_callback=self._manual_guided_probe,
-            )
-            second_summary = self.frida_analyzer.get_frida_summary()
-            second_payload: Dict[str, Any] = {"results": second_results, "summary": second_summary}
-            if second_results.get("error"):
-                second_payload["error"] = second_results["error"]
-            elif second_summary.get("error_messages") and not second_summary.get("total_api_calls"):
-                second_payload["error"] = second_summary["error_messages"][0]
-
-            merged_payload = self._merge_frida_payload(first_payload, second_payload)
-            merged_payload["adaptive_probe"]["triggered_manual_probe"] = True
             return merged_payload
         except Exception as error:
             return {"error": str(error)}
@@ -658,6 +2161,7 @@ class DynamicAnalyzer:
         print("=" * 60)
         print("start dynamic analysis")
         print("=" * 60)
+        self._activate_analysis_budget()
 
         analysis_result: Dict[str, Any] = {
             "device_connected": False,
@@ -676,13 +2180,14 @@ class DynamicAnalyzer:
             "app_permissions": None,
             "errors": [],
         }
+        runtime_probe_duration = self._step_budget(14, minimum_seconds=8, reserve_seconds=26 if self.frida_analyzer else 10)
 
         steps = [
             ("check_device", self._check_device_with_retry),
             ("install_apk", self.install_apk),
             ("start_app", self.start_app),
             ("simulate_user_interactions", self.simulate_user_interactions),
-            ("monitor_sensitive_api_calls", lambda: self.monitor_sensitive_api_calls(20)),
+            ("monitor_sensitive_api_calls", lambda: self.monitor_sensitive_api_calls(runtime_probe_duration, exercise_callback=self._exercise_runtime_probe)),
             ("perform_frida_analysis", self._perform_frida_analysis),
             ("get_network_traffic", self.get_network_traffic),
             ("get_battery_usage", self.get_battery_usage),
@@ -694,6 +2199,16 @@ class DynamicAnalyzer:
 
         for step_name, step_func in tqdm(steps, desc="dynamic analysis", unit="step"):
             try:
+                if step_name == "monitor_sensitive_api_calls" and runtime_probe_duration <= 0:
+                    print("[dynamic] skip runtime probe: analysis budget is low")
+                    continue
+                if step_name == "perform_frida_analysis" and not self._has_analysis_budget(minimum_seconds=12, reserve_seconds=6):
+                    print("[dynamic] skip Frida analysis: analysis budget is exhausted")
+                    analysis_result["frida_analysis"] = {"error": "analysis budget exhausted before Frida probe"}
+                    continue
+                if step_name in {"get_network_traffic", "get_battery_usage", "get_memory_usage", "get_cpu_usage"} and not self._has_analysis_budget(minimum_seconds=3):
+                    print(f"[dynamic] skip {step_name}: analysis budget is exhausted")
+                    continue
                 if step_name == "check_device":
                     if not step_func():
                         analysis_result["errors"].append("device is not connected")
@@ -721,7 +2236,12 @@ class DynamicAnalyzer:
                     )
                 elif step_name == "perform_frida_analysis":
                     analysis_result["frida_analysis"] = step_func()
-                    if analysis_result["frida_analysis"].get("error"):
+                    frida_state = str(analysis_result["frida_analysis"].get("state") or "").strip().lower()
+                    if analysis_result["frida_analysis"].get("error") and frida_state in {
+                        "startup_failed",
+                        "startup_incomplete",
+                        "bridge_ready_only",
+                    }:
                         analysis_result["errors"].append(
                             f"frida probe issue: {analysis_result['frida_analysis']['error']}"
                         )
@@ -767,20 +2287,28 @@ def _dynamic_analysis_worker(
     status_file: str,
     manual_probe_seconds: int,
     low_coverage_api_threshold: int,
+    analysis_timeout_budget_seconds: int,
 ) -> None:
     status_payload = {"success": False, "error": ""}
+    analyzer: Optional[DynamicAnalyzer] = None
     try:
         analyzer = DynamicAnalyzer(
             apk_path,
             results_dir,
             manual_probe_seconds=manual_probe_seconds,
             low_coverage_api_threshold=low_coverage_api_threshold,
+            analysis_timeout_budget_seconds=analysis_timeout_budget_seconds,
         )
         analyzer.save_result(result_file)
         status_payload["success"] = True
     except Exception as error:
         status_payload["error"] = f"{type(error).__name__}: {error}"
     finally:
+        if analyzer is not None:
+            try:
+                analyzer.cleanup_runtime_state()
+            except Exception:
+                pass
         with open(status_file, "w", encoding="utf-8") as output_handle:
             json.dump(status_payload, output_handle, ensure_ascii=False, indent=2)
 
@@ -794,18 +2322,59 @@ class DynamicBatchAnalyzer:
         manual_probe_seconds: int = 0,
         low_coverage_api_threshold: int = 4,
         manual_probe_apk_allowlist: Optional[List[str]] = None,
+        clear_app_data_after_analysis: bool = False,
     ):
         self.samples_dir = samples_dir
         self.results_dir = results_dir
         self.per_apk_timeout = max(120, int(per_apk_timeout))
+        self.internal_timeout_budget = max(
+            75,
+            self.per_apk_timeout - max(18, min(30, int(self.per_apk_timeout / 6))),
+        )
         self.manual_probe_seconds = max(0, int(manual_probe_seconds))
         self.low_coverage_api_threshold = max(1, int(low_coverage_api_threshold))
+        self.clear_app_data_after_analysis = bool(clear_app_data_after_analysis)
         self.manual_probe_apk_allowlist = {
             str(item).strip().lower()
             for item in (manual_probe_apk_allowlist or [])
             if str(item).strip()
         }
         os.makedirs(results_dir, exist_ok=True)
+
+    def _cleanup_analysis_environment(
+        self,
+        apk_file: str,
+        apk_path: str,
+        clear_app_data: bool,
+        phase: str,
+    ) -> None:
+        cleanup_analyzer: Optional[DynamicAnalyzer] = None
+        try:
+            cleanup_analyzer = DynamicAnalyzer(
+                apk_path,
+                self.results_dir,
+                manual_probe_seconds=0,
+                low_coverage_api_threshold=self.low_coverage_api_threshold,
+            )
+            cleanup_result = cleanup_analyzer.reset_analysis_environment(
+                clear_app_data=clear_app_data,
+                cleanup_background_apps=True,
+                clear_logs=True,
+                cleanup_label=f"{phase}: {apk_file}",
+            )
+            print(
+                "[cleanup] "
+                f"{phase} {apk_file}: "
+                f"desktop_ready={cleanup_result.get('desktop_ready')} "
+                f"force_stopped={len(cleanup_result.get('force_stopped_packages', []))} "
+                f"background_cleaned={len(cleanup_result.get('background_packages_cleaned', []))} "
+                f"app_data_cleared={cleanup_result.get('app_data_cleared')}"
+            )
+        except Exception as error:
+            print(f"[cleanup] {phase} {apk_file} failed: {error}")
+        finally:
+            if cleanup_analyzer is not None:
+                cleanup_analyzer.app_pid = None
 
     def _build_failed_result(self, apk_file: str, error_message: str) -> Dict[str, Any]:
         return {
@@ -856,6 +2425,7 @@ class DynamicBatchAnalyzer:
                 status_file,
                 manual_seconds_for_apk,
                 self.low_coverage_api_threshold,
+                self.internal_timeout_budget,
             ),
         )
         worker.start()
@@ -916,6 +2486,7 @@ class DynamicBatchAnalyzer:
         apk_files = [file_name for file_name in os.listdir(self.samples_dir) if file_name.endswith(".apk")]
         print(f"found {len(apk_files)} APK files")
         print(f"dynamic per-APK timeout: {self.per_apk_timeout}s")
+        print(f"dynamic internal soft budget: {self.internal_timeout_budget}s")
         print(
             f"adaptive manual probe: {'on' if self.manual_probe_seconds > 0 else 'off'} "
             f"(window={self.manual_probe_seconds}s, threshold={self.low_coverage_api_threshold})"
@@ -925,12 +2496,31 @@ class DynamicBatchAnalyzer:
                 "manual probe allowlist: "
                 + ", ".join(sorted(self.manual_probe_apk_allowlist))
             )
+        print(
+            "batch cleanup: on "
+            f"(clear_app_data_after_analysis={'on' if self.clear_app_data_after_analysis else 'off'})"
+        )
+
+        if apk_files:
+            first_apk_path = os.path.join(self.samples_dir, apk_files[0])
+            self._cleanup_analysis_environment(
+                apk_files[0],
+                first_apk_path,
+                clear_app_data=False,
+                phase="pre-batch cleanup",
+            )
 
         for apk_file in apk_files:
             apk_path = os.path.join(self.samples_dir, apk_file)
             print(f"\nanalyzing: {apk_file}")
             result = self._analyze_single_apk(apk_file, apk_path)
             results.append(result)
+            self._cleanup_analysis_environment(
+                apk_file,
+                apk_path,
+                clear_app_data=self.clear_app_data_after_analysis,
+                phase="post-analysis cleanup",
+            )
 
         self.save_summary(results)
         return results

@@ -181,6 +181,7 @@ class IntegratedAnalyzer:
         manual_probe_seconds: int = 0,
         low_coverage_api_threshold: int = 4,
         manual_probe_apk_allowlist: Optional[List[str]] = None,
+        clear_app_data_after_analysis: bool = False,
     ):
         self.samples_dir = samples_dir
         self.results_dir = results_dir
@@ -194,6 +195,7 @@ class IntegratedAnalyzer:
             manual_probe_seconds=manual_probe_seconds,
             low_coverage_api_threshold=low_coverage_api_threshold,
             manual_probe_apk_allowlist=manual_probe_apk_allowlist,
+            clear_app_data_after_analysis=clear_app_data_after_analysis,
         )
 
     def perform_static_analysis(self) -> List[Dict[str, Any]]:

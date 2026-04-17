@@ -37,6 +37,11 @@ def main() -> None:
         default="",
         help="人工补采目标 APK 文件名列表（逗号分隔，如 Mooc.apk,BaiDu.apk）；为空表示对全部样本生效",
     )
+    parser.add_argument(
+        "--clear-app-data-after-analysis",
+        action="store_true",
+        help="批量动态分析时，每个 APK 分析结束后执行 pm clear，确保下次分析从初始状态开始",
+    )
     args = parser.parse_args()
 
     samples_dir = "samples"
@@ -62,6 +67,10 @@ def main() -> None:
             f"人工补采: {'开启' if int(args.manual_probe_seconds) > 0 else '关闭'} "
             f"(窗口={max(0, int(args.manual_probe_seconds))}秒, 触发阈值={max(1, int(args.low_coverage_api_threshold))})"
         )
+        print(
+            "批量环境清理: 开启 "
+            f"(应用数据清理={'开启' if args.clear_app_data_after_analysis else '关闭'})"
+        )
 
     manual_probe_apks = [
         item.strip()
@@ -78,6 +87,7 @@ def main() -> None:
         manual_probe_seconds=args.manual_probe_seconds,
         low_coverage_api_threshold=args.low_coverage_api_threshold,
         manual_probe_apk_allowlist=manual_probe_apks,
+        clear_app_data_after_analysis=args.clear_app_data_after_analysis,
     )
     analyzer.run_full_analysis(skip_dynamic=args.skip_dynamic)
 

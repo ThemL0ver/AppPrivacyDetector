@@ -76,7 +76,20 @@
 
 针对“自动化命中不足”的场景，推荐：
 
-```powershell
+ ```powershell
 .venv\Scripts\python.exe main.py --only-integrated --dynamic-timeout-per-apk 300 --manual-probe-seconds 120 --low-coverage-api-threshold 5 --manual-probe-apks Mooc.apk
 ```
 
+## 6. 新增参数补充
+
+- `--clear-app-data-after-analysis`
+  - 类型：开关参数
+  - 默认：关闭
+  - 作用：在批量动态分析过程中，每个 APK 分析结束后对该 APK 执行 `pm clear`，清空应用缓存和数据。
+  - 适用场景：需要确保下一次分析从初始安装状态重新开始，避免登录态、缓存、引导页状态等跨样本残留。
+
+示例：
+
+```powershell
+.venv\Scripts\python.exe main.py --clear-app-data-after-analysis
+```

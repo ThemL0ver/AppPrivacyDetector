@@ -20,6 +20,7 @@ class HookManager:
         self.session = None
         self.script = None
         self.is_running = False
+        self.preferred_pids: List[int] = []
 
         self.hooked_apis: List[str] = []
         self.call_logs: List[Dict[str, Any]] = []
@@ -27,6 +28,21 @@ class HookManager:
         self.category_counts: Dict[str, int] = {}
         self.status_messages: List[str] = []
         self.errors: List[str] = []
+        self.detached_events: List[str] = []
+
+    def set_preferred_pids(self, pids: List[int]) -> None:
+        ordered: List[int] = []
+        seen = set()
+        for pid in pids or []:
+            try:
+                normalized = int(pid)
+            except (TypeError, ValueError):
+                continue
+            if normalized <= 0 or normalized in seen:
+                continue
+            seen.add(normalized)
+            ordered.append(normalized)
+        self.preferred_pids = ordered
 
     @classmethod
     def _get_bundle_mtime(cls, script_path: str) -> float:
@@ -171,20 +187,32 @@ class HookManager:
                 deduplicated.append(pid)
         return deduplicated
 
+    def _preferred_attach_attempts(self) -> List[Tuple[str, Any]]:
+        attempts: List[Tuple[str, Any]] = []
+        for pid in self.preferred_pids:
+            attempts.append((f"preferred_pid:{pid}", lambda pid=pid: self.device.attach(pid)))
+        return attempts
+
     def start(self, spawn: bool = False) -> Tuple[bool, Optional[int]]:
         if not self.device and not self.connect_device():
             return False, None
 
         attach_attempts: List[Tuple[str, Any]] = []
         if not spawn:
+            attach_attempts.extend(self._preferred_attach_attempts())
             attach_attempts.append(("package", lambda: self.device.attach(self.package_name)))
             for pid in self._find_running_pids():
+                if pid in self.preferred_pids:
+                    continue
                 attach_attempts.append((f"pid:{pid}", lambda pid=pid: self.device.attach(pid)))
             attach_attempts.append(("spawn_fallback", lambda: ("spawn", self.device.spawn([self.package_name]))))
         else:
             attach_attempts.append(("spawn", lambda: ("spawn", self.device.spawn([self.package_name]))))
+            attach_attempts.extend(self._preferred_attach_attempts())
             attach_attempts.append(("package_fallback", lambda: self.device.attach(self.package_name)))
             for pid in self._find_running_pids():
+                if pid in self.preferred_pids:
+                    continue
                 attach_attempts.append((f"pid:{pid}", lambda pid=pid: self.device.attach(pid)))
 
         for attempt_name, attempt in attach_attempts:
@@ -193,11 +221,13 @@ class HookManager:
                 if isinstance(result, tuple) and result[0] == "spawn":
                     pid = int(result[1])
                     self.session = self.device.attach(pid)
+                    self.session.on("detached", self._on_detached)
                     self.is_running = True
                     print(f"[HookManager] attached by {attempt_name}, pid={pid}")
                     return True, pid
 
                 self.session = result
+                self.session.on("detached", self._on_detached)
                 self.is_running = True
                 print(f"[HookManager] attached by {attempt_name}")
                 return True, None
@@ -227,6 +257,16 @@ class HookManager:
         except Exception as error:
             print(f"[HookManager] load script failed: {error}")
             return False
+
+    def _on_detached(self, reason: Any, crash: Any) -> None:
+        detached_reason = str(reason or "unknown")
+        crash_text = str(crash or "").strip()
+        message = f"session detached: reason={detached_reason}"
+        if crash_text:
+            message += f", crash={crash_text}"
+        self.detached_events.append(message)
+        self.errors.append(message)
+        print(f"[HookManager] {message}")
 
     def _record_api_call(self, payload: Dict[str, Any]) -> None:
         api_name = str(payload.get("api") or "").strip()
@@ -331,6 +371,25 @@ class HookManager:
 
     def get_errors(self) -> List[str]:
         return list(self.errors)
+
+    def get_detached_events(self) -> List[str]:
+        return list(self.detached_events)
+
+    def wait_for_script_ready(self, timeout: int = 8) -> bool:
+        started_at = time.time()
+        while time.time() - started_at < max(1, int(timeout)):
+            status_blob = "\n".join(self.status_messages).lower()
+            error_blob = "\n".join(self.errors).lower()
+            if "sensitive api hooks ready" in status_blob:
+                return True
+            if "hook bootstrap failed" in error_blob or "java.perform failed" in error_blob:
+                return False
+            if "java runtime is not available" in error_blob:
+                return False
+            if any("session detached:" in item.lower() for item in self.detached_events):
+                return False
+            time.sleep(0.2)
+        return "java bridge ready" in "\n".join(self.status_messages).lower()
 
     def get_aggregated_calls(self) -> List[Dict[str, Any]]:
         grouped: Dict[str, Dict[str, Any]] = {}

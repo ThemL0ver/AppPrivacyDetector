@@ -338,16 +338,95 @@
             return [];
         }
 
-        function getFridaErrorMessage(dynamicAnalysis) {
+        function getFridaDisplayStatus(dynamicAnalysis) {
             const frida = dynamicAnalysis?.frida_analysis || {};
-            if (frida?.error) {
-                return String(frida.error);
-            }
             const summary = frida?.summary || {};
-            if (Array.isArray(summary.error_messages) && summary.error_messages.length) {
-                return String(summary.error_messages[0]);
+            const state = String(frida?.state || '').toLowerCase();
+            const totalApiCalls = Number(summary?.total_api_calls || 0);
+            const totalSignals = Number(summary?.total_hooked_signals || summary?.total_hooked_apis || 0);
+            const hookReady = !!summary?.java_hook_ready || (Array.isArray(summary?.status_messages) && summary.status_messages.some(item => String(item).toLowerCase().includes('sensitive api hooks ready')));
+            const hasStructuredHits = totalApiCalls > 0
+                || totalSignals > 0
+                || (Array.isArray(summary?.aggregated_calls) && summary.aggregated_calls.length > 0)
+                || (Array.isArray(frida?.results?.call_logs) && frida.results.call_logs.length > 0);
+            const processTerminated = !!summary?.process_terminated
+                || (Array.isArray(summary?.detached_events) && summary.detached_events.some(item => String(item).toLowerCase().includes('process-terminated')))
+                || (Array.isArray(summary?.error_messages) && summary.error_messages.some(item => String(item).toLowerCase().includes('process-terminated')))
+                || String(frida?.error || '').toLowerCase().includes('process-terminated');
+            const sessionDetached = !!summary?.session_detached
+                || (Array.isArray(summary?.detached_events) && summary.detached_events.some(item => String(item).toLowerCase().includes('session detached:')))
+                || (Array.isArray(summary?.error_messages) && summary.error_messages.some(item => String(item).toLowerCase().includes('session detached:')))
+                || String(frida?.error || '').toLowerCase().includes('session detached:');
+
+            const detachedMessage = String(
+                frida?.warning
+                || (Array.isArray(summary?.warning_messages) && summary.warning_messages.length ? summary.warning_messages[0] : '')
+                || (Array.isArray(summary?.detached_events) && summary.detached_events.length ? summary.detached_events[0] : '')
+                || frida?.error
+                || ''
+            );
+
+            if (state === 'runtime_interrupted') {
+                return {
+                    level: 'warning',
+                    message: detachedMessage || 'Java Hook 已就绪，但目标进程在运行中退出',
+                };
             }
-            return '';
+            if (state === 'captured') {
+                if (frida?.warning || (sessionDetached && detachedMessage)) {
+                    return {
+                        level: 'warning',
+                        message: detachedMessage || 'Java Hook 已产生命中结果，但会话在运行中断开',
+                    };
+                }
+                return { level: '', message: '' };
+            }
+            if (state === 'ready_no_hits') {
+                return {
+                    level: 'muted',
+                    message: String(frida?.warning || 'Java Hook 已就绪，但当前探测窗口未捕获到敏感 API 调用'),
+                };
+            }
+            if (!state && hookReady && processTerminated) {
+                return {
+                    level: 'warning',
+                    message: detachedMessage || 'Java Hook 已就绪，但目标进程在运行中退出',
+                };
+            }
+            if (!state && hasStructuredHits && sessionDetached) {
+                return {
+                    level: 'warning',
+                    message: detachedMessage || 'Java Hook 已产生命中结果，但会话在运行中断开',
+                };
+            }
+            if (!state && hasStructuredHits) {
+                return { level: '', message: '' };
+            }
+            if (!state && hookReady && !(summary?.total_api_calls > 0)) {
+                return {
+                    level: 'muted',
+                    message: String(frida?.warning || 'Java Hook 已就绪，但当前探测窗口未捕获到敏感 API 调用'),
+                };
+            }
+            if (frida?.error) {
+                return {
+                    level: 'error',
+                    message: String(frida.error),
+                };
+            }
+            if (Array.isArray(summary.error_messages) && summary.error_messages.length) {
+                return {
+                    level: 'error',
+                    message: String(summary.error_messages[0]),
+                };
+            }
+            if (Array.isArray(summary.warning_messages) && summary.warning_messages.length) {
+                return {
+                    level: 'warning',
+                    message: String(summary.warning_messages[0]),
+                };
+            }
+            return { level: '', message: '' };
         }
 
         function buildFridaTableRows(dynamicAnalysis) {
@@ -650,12 +729,10 @@
 
                     if (dynamicAnalysis.frida_analysis) {
                         const frida = dynamicAnalysis.frida_analysis;
-                        const fridaErrorMessage = getFridaErrorMessage(dynamicAnalysis);
+                        const fridaStatus = getFridaDisplayStatus(dynamicAnalysis);
                         dynamicHtml += `<div class="p-3 bg-white border border-info rounded shadow-sm">
                             <h6 class="text-info fw-bold mb-3"><span class="fs-5">💉</span> Frida 深度探针检测结果</h6>`;
-                        if (fridaErrorMessage) {
-                            dynamicHtml += `<p class="text-danger mb-2">探针注入失败或未进入 Java Hook 阶段: ${escapeHtml(fridaErrorMessage)}</p>`;
-                        } else {
+                        if (fridaStatus.level !== 'error') {
                             dynamicHtml += `
                                 <div class="d-flex gap-3">
                                     <div class="badge bg-secondary p-2 px-3 fs-6 rounded-pill">拦截 API 调用: <span class="text-warning">${frida.summary?.total_api_calls || 0} 次</span></div>
@@ -663,9 +740,15 @@
                                     <div class="badge bg-secondary p-2 px-3 fs-6 rounded-pill">侦测时长: <span class="text-info">${parseFloat(frida.summary?.duration || 0).toFixed(1)} s</span></div>
                                 </div>
                             `;
-                            if (!(frida.summary?.total_api_calls > 0)) {
+                            if (fridaStatus.message && fridaStatus.level === 'warning') {
+                                dynamicHtml += `<p class="text-warning mt-3 mb-0">${escapeHtml(fridaStatus.message)}</p>`;
+                            } else if (fridaStatus.message && fridaStatus.level === 'muted') {
+                                dynamicHtml += `<p class="text-muted mt-3 mb-0">${escapeHtml(fridaStatus.message)}</p>`;
+                            } else if (!(frida.summary?.total_api_calls > 0)) {
                                 dynamicHtml += `<p class="text-muted mt-3 mb-0">本次 Frida 深度探针未拦截到敏感 API 调用。</p>`;
                             }
+                        } else {
+                            dynamicHtml += `<p class="text-danger mb-2">探针注入失败或未进入 Java Hook 阶段: ${escapeHtml(fridaStatus.message)}</p>`;
                         }
                         dynamicHtml += `</div>`;
                     }
@@ -774,10 +857,12 @@
             }
 
             const fridaSummary = dyn?.frida_analysis?.summary || {};
-            const fridaErrorMessage = getFridaErrorMessage(dyn);
+            const fridaStatus = getFridaDisplayStatus(dyn);
             let fridaHeadline = '本次 Frida 深度探针未拦截到敏感 API 调用。';
-            if (fridaErrorMessage) {
-                fridaHeadline = `探针注入遭遇应用对抗防御或未进入 Java Hook 阶段，错误日志：${escapeHtml(fridaErrorMessage)}`;
+            if (fridaStatus.message && fridaStatus.level === 'error') {
+                fridaHeadline = `探针注入遭遇应用对抗防御或未进入 Java Hook 阶段，错误日志：${escapeHtml(fridaStatus.message)}`;
+            } else if (fridaStatus.message && fridaStatus.level === 'warning') {
+                fridaHeadline = `Java Hook 已进入敏感 API 监控阶段，但目标进程在运行中退出：${escapeHtml(fridaStatus.message)}`;
             } else if ((fridaSummary.total_api_calls || 0) > 0) {
                 fridaHeadline = `拦截到敏感调用 <b>${normalizeScore(fridaSummary.total_api_calls || 0)}</b> 次，归并为 <b>${normalizeScore(fridaSummary.total_hooked_signals || fridaSummary.total_hooked_apis || 0)}</b> 类信号。`;
             }

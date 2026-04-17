@@ -1,0 +1,19 @@
+{
+  "device_connected": true,
+  "apk_installed": true,
+  "app_started": false,
+  "user_interactions": false,
+  "runtime_probe_api_calls": {},
+  "sensitive_api_calls": {},
+  "frida_sensitive_api_calls": {},
+  "frida_analysis": {},
+  "network_traffic": [],
+  "battery_usage": null,
+  "memory_usage": null,
+  "cpu_usage": null,
+  "app_info": null,
+  "app_permissions": null,
+  "errors": [
+    "app start failed"
+  ]
+}

@@ -2,9 +2,219 @@ import Java from "frida-java-bridge";
 
 "use strict";
 
+var earlyNativeGuardState = {
+    tracerPid: false,
+    rootPath: false,
+    systemProperty: false,
+    bootstrapped: false
+};
+
+function resolveExport(moduleName, symbolName) {
+    try {
+        if (typeof Module !== "undefined" && Module) {
+            if (typeof Module.getExportByName === "function") {
+                try {
+                    return Module.getExportByName(moduleName, symbolName);
+                } catch (e) {}
+            }
+            if (typeof Module.findExportByName === "function") {
+                try {
+                    return Module.findExportByName(moduleName, symbolName);
+                } catch (e) {}
+            }
+        }
+    } catch (e) {}
+
+    try {
+        if (typeof Process !== "undefined" && Process && typeof Process.getModuleByName === "function") {
+            var moduleObject = Process.getModuleByName(moduleName);
+            if (moduleObject) {
+                if (typeof moduleObject.getExportByName === "function") {
+                    try {
+                        return moduleObject.getExportByName(symbolName);
+                    } catch (e) {}
+                }
+                if (typeof moduleObject.findExportByName === "function") {
+                    try {
+                        return moduleObject.findExportByName(symbolName);
+                    } catch (e) {}
+                }
+            }
+        }
+    } catch (e) {}
+
+    return null;
+}
+
+function readNativeUtf8(pointerValue) {
+    try {
+        if (!pointerValue || pointerValue.isNull()) {
+            return "";
+        }
+        return String(Memory.readUtf8String(pointerValue) || "");
+    } catch (e) {
+        return "";
+    }
+}
+
+function isSuspiciousNativePath(pathText) {
+    var normalized = String(pathText || "").toLowerCase();
+    if (!normalized) return false;
+    var keywords = [
+        "/system/bin/su",
+        "/system/xbin/su",
+        "/sbin/su",
+        "magisk",
+        "zygisk",
+        "xposed",
+        "busybox",
+        "frida",
+        "/proc/self/status",
+        "/proc/",
+        "superuser"
+    ];
+    return keywords.some(function (keyword) { return normalized.indexOf(keyword) !== -1; });
+}
+
+function installNativeTracerPidGuard() {
+    if (earlyNativeGuardState.tracerPid) {
+        return;
+    }
+    try {
+        var fgetsPtr = resolveExport("libc.so", "fgets");
+        if (!fgetsPtr || typeof Interceptor === "undefined" || typeof Interceptor.attach !== "function") {
+            send({ type: "status", message: "native anti-debug skipped" });
+            return;
+        }
+        Interceptor.attach(fgetsPtr, {
+            onEnter: function (args) {
+                this.buffer = args[0];
+            },
+            onLeave: function (retval) {
+                try {
+                    if (!this.buffer || retval.isNull()) return;
+                    var line = Memory.readUtf8String(this.buffer);
+                    if (line && line.indexOf("TracerPid:") !== -1) {
+                        Memory.writeUtf8String(this.buffer, "TracerPid:\t0");
+                    }
+                } catch (e) {}
+            }
+        });
+        earlyNativeGuardState.tracerPid = true;
+        send({ type: "status", message: "native anti-debug installed" });
+    } catch (e) {
+        send({ type: "status", message: "native anti-debug skipped: " + e });
+    }
+}
+
+function installNativeRootPathGuard() {
+    if (earlyNativeGuardState.rootPath) {
+        return;
+    }
+    try {
+        if (typeof Interceptor === "undefined" || typeof Interceptor.attach !== "function") {
+            send({ type: "status", message: "native root path guard skipped" });
+            return;
+        }
+
+        var installedCount = 0;
+        [
+            { symbol: "access", pathIndex: 0 },
+            { symbol: "stat", pathIndex: 0 },
+            { symbol: "lstat", pathIndex: 0 },
+            { symbol: "open", pathIndex: 0 },
+            { symbol: "openat", pathIndex: 1 },
+            { symbol: "faccessat", pathIndex: 1 }
+        ].forEach(function (hookSpec) {
+            var nativePtr = resolveExport("libc.so", hookSpec.symbol);
+            if (!nativePtr) {
+                return;
+            }
+            Interceptor.attach(nativePtr, {
+                onEnter: function (args) {
+                    this.targetPath = readNativeUtf8(args[hookSpec.pathIndex]);
+                    this.shouldMask = isSuspiciousNativePath(this.targetPath);
+                },
+                onLeave: function (retval) {
+                    if (!this.shouldMask) {
+                        return;
+                    }
+                    try {
+                        retval.replace(ptr("-1"));
+                    } catch (replaceError) {
+                        try {
+                            retval.replace(-1);
+                        } catch (ignored) {}
+                    }
+                }
+            });
+            installedCount += 1;
+        });
+
+        if (installedCount > 0) {
+            earlyNativeGuardState.rootPath = true;
+            send({ type: "status", message: "native root path guard installed" });
+        } else {
+            send({ type: "status", message: "native root path guard skipped" });
+        }
+    } catch (e) {
+        send({ type: "status", message: "native root path guard skipped: " + e });
+    }
+}
+
+function installNativeSystemPropertyGuard() {
+    if (earlyNativeGuardState.systemProperty) {
+        return;
+    }
+    try {
+        var propertyPtr = resolveExport("libc.so", "__system_property_get");
+        if (!propertyPtr || typeof Interceptor === "undefined" || typeof Interceptor.attach !== "function") {
+            send({ type: "status", message: "native system property guard skipped" });
+            return;
+        }
+        Interceptor.attach(propertyPtr, {
+            onEnter: function (args) {
+                this.key = readNativeUtf8(args[0]).toLowerCase();
+                this.valueBuffer = args[1];
+            },
+            onLeave: function (retval) {
+                if (!this.valueBuffer || !this.key) {
+                    return;
+                }
+                var replacement = "";
+                if (this.key === "ro.debuggable") replacement = "0";
+                if (this.key === "ro.secure") replacement = "1";
+                if (this.key === "ro.build.tags") replacement = "release-keys";
+                if (!replacement) {
+                    return;
+                }
+                try {
+                    Memory.writeUtf8String(this.valueBuffer, replacement);
+                    retval.replace(ptr(String(replacement.length)));
+                } catch (e) {}
+            }
+        });
+        earlyNativeGuardState.systemProperty = true;
+        send({ type: "status", message: "native system property guard installed" });
+    } catch (e) {
+        send({ type: "status", message: "native system property guard skipped: " + e });
+    }
+}
+
+function installEarlyNativeGuards() {
+    if (earlyNativeGuardState.bootstrapped) {
+        return;
+    }
+    earlyNativeGuardState.bootstrapped = true;
+    installNativeTracerPidGuard();
+    installNativeRootPathGuard();
+    installNativeSystemPropertyGuard();
+}
+
 function bootstrapHooks(retryCount) {
     if ((retryCount || 0) === 0) {
         send({ type: "status", message: "frida bootstrap entered" });
+        installEarlyNativeGuards();
     }
 
     if (!Java.available) {
@@ -31,6 +241,7 @@ function bootstrapHooks(retryCount) {
             try {
             var Log = Java.use("android.util.Log");
             var Exception = Java.use("java.lang.Exception");
+            var bootstrapStartedAt = Date.now();
 
             function s(v) {
                 try {
@@ -58,6 +269,71 @@ function bootstrapHooks(retryCount) {
                 send({ type: "error", timestamp: Date.now() / 1000, message: String(message) });
             }
 
+            function safeStackLower() {
+                try {
+                    return stack().toLowerCase();
+                } catch (e) {
+                    return "";
+                }
+            }
+
+            function withinStartupGuardWindow() {
+                return Date.now() - bootstrapStartedAt <= 20000;
+            }
+
+            function isSecurityProbeText(text) {
+                return has(text, [
+                    "su",
+                    "magisk",
+                    "zygisk",
+                    "xposed",
+                    "busybox",
+                    "frida",
+                    "tracerpid",
+                    "/proc/self/status",
+                    "getprop",
+                    "which"
+                ]);
+            }
+
+            function isSecurityStack(stackText) {
+                return has(stackText, [
+                    "root",
+                    "magisk",
+                    "zygisk",
+                    "xposed",
+                    "frida",
+                    "hook",
+                    "tracerpid",
+                    "debug",
+                    "su"
+                ]);
+            }
+
+            function sanitizeExecArg(value) {
+                if (value === null || value === undefined) return value;
+                if (typeof value === "string") {
+                    return isSecurityProbeText(value) ? "invalid_command" : value;
+                }
+                try {
+                    if (typeof value.length === "number") {
+                        for (var i = 0; i < value.length; i++) {
+                            var itemText = s(value[i]);
+                            if (itemText && isSecurityProbeText(itemText)) {
+                                value[i] = "invalid_command";
+                            }
+                        }
+                    }
+                } catch (e) {}
+                return value;
+            }
+
+            function shouldBlockTermination(reasonText) {
+                var stackText = safeStackLower();
+                if (!withinStartupGuardWindow()) return false;
+                return isSecurityProbeText(reasonText) || isSecurityStack(stackText);
+            }
+
             function sendApi(meta, args, ret, extra) {
                 var payload = {
                     type: "api_call",
@@ -74,6 +350,20 @@ function bootstrapHooks(retryCount) {
                     Object.keys(extra).forEach(function (key) { payload[key] = extra[key]; });
                 }
                 send(payload);
+            }
+
+            function sendAntiAnalysisProbe(apiName, detailText, extra) {
+                sendApi(
+                    {
+                        category: "anti_analysis",
+                        signalKey: "antiAnalysisProbe",
+                        api: apiName,
+                        description: detailText || "anti-analysis probe"
+                    },
+                    detailText ? [detailText] : [],
+                    "",
+                    extra || {}
+                );
             }
 
             function has(text, patterns) {
@@ -112,19 +402,161 @@ function bootstrapHooks(retryCount) {
             }
         }
 
+        function installNativeAntiDebug() {
+            installNativeTracerPidGuard();
+            installNativeRootPathGuard();
+            installNativeSystemPropertyGuard();
+        }
+
         function installRootBypass() {
             try {
                 var File = Java.use("java.io.File");
                 var Runtime = Java.use("java.lang.Runtime");
+                var Debug = Java.use("android.os.Debug");
+                var SystemProperties = Java.use("android.os.SystemProperties");
+                var Activity = Java.use("android.app.Activity");
+                var Process = Java.use("android.os.Process");
+                var SystemClass = Java.use("java.lang.System");
+                var ProcessBuilder = Java.use("java.lang.ProcessBuilder");
+                var ApplicationPackageManager = Java.use("android.app.ApplicationPackageManager");
+                var NameNotFoundException = Java.use("android.content.pm.PackageManager$NameNotFoundException");
+                var ArrayList = Java.use("java.util.ArrayList");
                 var suspicious = ["/system/bin/su", "/system/xbin/su", "/data/local/tmp/frida-server", "magisk", "frida"];
+                var suspiciousPackages = [
+                    "com.topjohnwu.magisk",
+                    "eu.chainfire.supersu",
+                    "com.thirdparty.superuser",
+                    "com.koushikdutta.superuser",
+                    "de.robv.android.xposed.installer",
+                    "io.github.vvb2060.magisk"
+                ];
                 var exists = File.exists.overload();
                 exists.implementation = function () {
-                    return has(this.getAbsolutePath(), suspicious) ? false : exists.call(this);
+                    var absolutePath = s(this.getAbsolutePath());
+                    if (has(absolutePath, suspicious)) {
+                        sendAntiAnalysisProbe("java.io.File.exists", "probe suspicious path: " + absolutePath, { path: absolutePath });
+                        return false;
+                    }
+                    return exists.call(this);
                 };
-                var execString = Runtime.exec.overload("java.lang.String");
-                execString.implementation = function (command) {
-                    return has(command, ["su", "which", "magisk"]) ? execString.call(this, "invalid_command") : execString.call(this, command);
+                Runtime.exec.overloads.forEach(function (overload) {
+                    overload.implementation = function () {
+                        var args = Array.prototype.slice.call(arguments);
+                        var joinedCommand = s(args);
+                        if (isSecurityProbeText(joinedCommand)) {
+                            sendAntiAnalysisProbe("java.lang.Runtime.exec", "runtime exec security probe", { command: joinedCommand });
+                        }
+                        for (var i = 0; i < args.length; i++) {
+                            args[i] = sanitizeExecArg(args[i]);
+                        }
+                        return overload.call.apply(overload, [this].concat(args));
+                    };
+                });
+                try {
+                    var startProcessBuilder = ProcessBuilder.start.overload();
+                    startProcessBuilder.implementation = function () {
+                        try {
+                            var commandList = this.command();
+                            var joined = s(commandList);
+                            if (isSecurityProbeText(joined)) {
+                                var safeList = ArrayList.$new();
+                                safeList.add("invalid_command");
+                                this.command(safeList);
+                                sendAntiAnalysisProbe("java.lang.ProcessBuilder.start", "process builder security probe", { command: joined });
+                                sendStatus("neutralized ProcessBuilder root probe");
+                            }
+                        } catch (e) {}
+                        return startProcessBuilder.call(this);
+                    };
+                } catch (e) {
+                    sendError("process builder bypass failed: " + e);
+                }
+                Debug.isDebuggerConnected.implementation = function () {
+                    return false;
                 };
+                Debug.waitingForDebugger.implementation = function () {
+                    return false;
+                };
+                try {
+                    var getProperty = SystemProperties.get.overload("java.lang.String");
+                    getProperty.implementation = function (key) {
+                        var normalized = s(key).toLowerCase();
+                        if (normalized === "ro.debuggable" || normalized === "ro.secure" || normalized === "ro.build.tags") {
+                            sendAntiAnalysisProbe("android.os.SystemProperties.get", "system property probe: " + normalized, { property_key: normalized });
+                        }
+                        if (normalized === "ro.debuggable") return "0";
+                        if (normalized === "ro.secure") return "1";
+                        if (normalized === "ro.build.tags") return "release-keys";
+                        return getProperty.call(this, key);
+                    };
+                } catch (e) {}
+                try {
+                    var getPropertyDefault = SystemProperties.get.overload("java.lang.String", "java.lang.String");
+                    getPropertyDefault.implementation = function (key, fallback) {
+                        var normalized = s(key).toLowerCase();
+                        if (normalized === "ro.debuggable" || normalized === "ro.secure" || normalized === "ro.build.tags") {
+                            sendAntiAnalysisProbe("android.os.SystemProperties.get", "system property probe: " + normalized, { property_key: normalized });
+                        }
+                        if (normalized === "ro.debuggable") return "0";
+                        if (normalized === "ro.secure") return "1";
+                        if (normalized === "ro.build.tags") return "release-keys";
+                        return getPropertyDefault.call(this, key, fallback);
+                    };
+                } catch (e) {}
+                try {
+                    ["getPackageInfo", "getApplicationInfo"].forEach(function (methodName) {
+                        if (!ApplicationPackageManager[methodName]) return;
+                        ApplicationPackageManager[methodName].overloads.forEach(function (overload) {
+                            overload.implementation = function () {
+                                var packageName = s(arguments[0]).toLowerCase();
+                                if (suspiciousPackages.indexOf(packageName) !== -1) {
+                                    sendAntiAnalysisProbe("android.app.ApplicationPackageManager." + methodName, "query suspicious package: " + packageName, { package_name: packageName });
+                                    throw NameNotFoundException.$new(arguments[0]);
+                                }
+                                return overload.call.apply(overload, [this].concat(Array.prototype.slice.call(arguments)));
+                            };
+                        });
+                    });
+                } catch (e) {
+                    sendError("package manager bypass failed: " + e);
+                }
+                try {
+                    var systemExit = SystemClass.exit.overload("int");
+                    systemExit.implementation = function (code) {
+                        if (shouldBlockTermination("system.exit " + code)) {
+                            sendAntiAnalysisProbe("java.lang.System.exit", "blocked system exit during startup", { exit_code: s(code) });
+                            sendStatus("blocked System.exit during startup security probe");
+                            return;
+                        }
+                        return systemExit.call(this, code);
+                    };
+                } catch (e) {}
+                try {
+                    var killProcess = Process.killProcess.overload("int");
+                    killProcess.implementation = function (pid) {
+                        if (shouldBlockTermination("killProcess " + pid)) {
+                            sendAntiAnalysisProbe("android.os.Process.killProcess", "blocked killProcess during startup", { pid: s(pid) });
+                            sendStatus("blocked Process.killProcess during startup security probe");
+                            return;
+                        }
+                        return killProcess.call(this, pid);
+                    };
+                } catch (e) {}
+                ["finish", "finishAffinity", "finishAndRemoveTask"].forEach(function (methodName) {
+                    try {
+                        if (!Activity[methodName]) return;
+                        Activity[methodName].overloads.forEach(function (overload) {
+                            overload.implementation = function () {
+                                if (shouldBlockTermination("activity." + methodName)) {
+                                    sendAntiAnalysisProbe("android.app.Activity." + methodName, "blocked activity termination during startup", { method: methodName });
+                                    sendStatus("blocked Activity." + methodName + " during startup security probe");
+                                    return;
+                                }
+                                return overload.call.apply(overload, [this].concat(Array.prototype.slice.call(arguments)));
+                            };
+                        });
+                    } catch (e) {}
+                });
                 sendStatus("root bypass installed");
             } catch (e) {
                 sendError("root bypass failed: " + e);
@@ -238,6 +670,7 @@ function bootstrapHooks(retryCount) {
             };
         }
 
+        installNativeAntiDebug();
         installRootBypass();
 
         ["noteOp", "noteOpNoThrow", "noteProxyOp", "noteProxyOpNoThrow", "checkOp", "checkOpNoThrow", "startOp", "startOpNoThrow"].forEach(function (methodName) {
@@ -292,9 +725,30 @@ function bootstrapHooks(retryCount) {
             { className: "android.app.ApplicationPackageManager", methodName: "queryIntentActivities", meta: { category: "package_manager", signalKey: "getInstalledPackages", api: "android.app.ApplicationPackageManager.queryIntentActivities", description: "query intent activities" } },
             { className: "android.app.ApplicationPackageManager", methodName: "queryIntentServices", meta: { category: "package_manager", signalKey: "getInstalledPackages", api: "android.app.ApplicationPackageManager.queryIntentServices", description: "query intent services" } },
             { className: "android.app.ApplicationPackageManager", methodName: "queryIntentReceivers", meta: { category: "package_manager", signalKey: "getInstalledPackages", api: "android.app.ApplicationPackageManager.queryIntentReceivers", description: "query intent receivers" } },
+            { className: "android.app.Activity", methodName: "requestPermissions", meta: { category: "permission", signalKey: "permissionRequest", api: "android.app.Activity.requestPermissions", description: "request Android runtime permissions" } },
+            { className: "androidx.core.app.ActivityCompat", methodName: "requestPermissions", meta: { category: "permission", signalKey: "permissionRequest", api: "androidx.core.app.ActivityCompat.requestPermissions", description: "request AndroidX runtime permissions" } },
+            { className: "android.content.ContextWrapper", methodName: "checkSelfPermission", meta: { category: "permission", signalKey: "permissionCheck", api: "android.content.ContextWrapper.checkSelfPermission", description: "check runtime permission" } },
+            { className: "android.content.pm.PackageManager", methodName: "checkPermission", meta: { category: "permission", signalKey: "permissionCheck", api: "android.content.pm.PackageManager.checkPermission", description: "check package permission" } },
+            { className: "androidx.core.content.ContextCompat", methodName: "checkSelfPermission", meta: { category: "permission", signalKey: "permissionCheck", api: "androidx.core.content.ContextCompat.checkSelfPermission", description: "check AndroidX runtime permission" } },
+            { className: "androidx.core.content.PermissionChecker", methodName: "checkSelfPermission", meta: { category: "permission", signalKey: "permissionCheck", api: "androidx.core.content.PermissionChecker.checkSelfPermission", description: "check permission by PermissionChecker" } },
+            { className: "android.webkit.WebView", methodName: "loadUrl", meta: { category: "webview", signalKey: "webViewNavigation", api: "android.webkit.WebView.loadUrl", description: "navigate WebView URL" } },
+            { className: "android.webkit.WebView", methodName: "postUrl", meta: { category: "webview", signalKey: "webViewNavigation", api: "android.webkit.WebView.postUrl", description: "post WebView URL" } },
+            { className: "android.webkit.WebView", methodName: "loadDataWithBaseURL", meta: { category: "webview", signalKey: "webViewNavigation", api: "android.webkit.WebView.loadDataWithBaseURL", description: "load WebView data with base URL" } },
+            { className: "android.webkit.WebView", methodName: "evaluateJavascript", meta: { category: "webview", signalKey: "webViewNavigation", api: "android.webkit.WebView.evaluateJavascript", description: "evaluate WebView JavaScript" } },
+            { className: "com.tencent.smtt.sdk.WebView", methodName: "loadUrl", meta: { category: "webview", signalKey: "webViewNavigation", api: "com.tencent.smtt.sdk.WebView.loadUrl", description: "navigate X5 WebView URL" } },
+            { className: "com.tencent.smtt.sdk.WebView", methodName: "postUrl", meta: { category: "webview", signalKey: "webViewNavigation", api: "com.tencent.smtt.sdk.WebView.postUrl", description: "post X5 WebView URL" } },
+            { className: "com.uc.webview.export.WebView", methodName: "loadUrl", meta: { category: "webview", signalKey: "webViewNavigation", api: "com.uc.webview.export.WebView.loadUrl", description: "navigate UC WebView URL" } },
+            { className: "com.uc.webview.export.WebView", methodName: "postUrl", meta: { category: "webview", signalKey: "webViewNavigation", api: "com.uc.webview.export.WebView.postUrl", description: "post UC WebView URL" } },
+            { className: "android.webkit.CookieManager", methodName: "getCookie", meta: { category: "webview", signalKey: "cookieAccess", api: "android.webkit.CookieManager.getCookie", description: "read WebView cookie" } },
+            { className: "android.webkit.CookieManager", methodName: "setCookie", meta: { category: "webview", signalKey: "cookieAccess", api: "android.webkit.CookieManager.setCookie", description: "write WebView cookie" } },
             { className: "java.net.URL", methodName: "openConnection", meta: { category: "network", signalKey: "accessNetwork", api: "java.net.URL.openConnection", description: "open URL connection" } },
+            { className: "java.net.URLConnection", methodName: "connect", meta: { category: "network", signalKey: "accessNetwork", api: "java.net.URLConnection.connect", description: "connect URL connection" } },
+            { className: "java.net.HttpURLConnection", methodName: "connect", meta: { category: "network", signalKey: "accessNetwork", api: "java.net.HttpURLConnection.connect", description: "connect HTTP URL connection" } },
+            { className: "javax.net.ssl.HttpsURLConnection", methodName: "connect", meta: { category: "network", signalKey: "accessNetwork", api: "javax.net.ssl.HttpsURLConnection.connect", description: "connect HTTPS URL connection" } },
             { className: "java.net.Socket", methodName: "connect", meta: { category: "network", signalKey: "accessNetwork", api: "java.net.Socket.connect", description: "open socket connection" } },
             { className: "okhttp3.OkHttpClient", methodName: "newCall", meta: { category: "network", signalKey: "accessNetwork", api: "okhttp3.OkHttpClient.newCall", description: "start OkHttp call" } },
+            { className: "okhttp3.RealCall", methodName: "execute", meta: { category: "network", signalKey: "accessNetwork", api: "okhttp3.RealCall.execute", description: "execute OkHttp call" } },
+            { className: "okhttp3.RealCall", methodName: "enqueue", meta: { category: "network", signalKey: "accessNetwork", api: "okhttp3.RealCall.enqueue", description: "enqueue OkHttp call" } },
             { className: "android.content.ContextWrapper", methodName: "openFileInput", meta: { category: "storage", signalKey: "accessStorage", api: "android.content.ContextWrapper.openFileInput", description: "read internal file" } },
             { className: "android.content.ContextWrapper", methodName: "openFileOutput", meta: { category: "storage", signalKey: "accessStorage", api: "android.content.ContextWrapper.openFileOutput", description: "write internal file" } },
             { className: "android.os.Environment", methodName: "getExternalStorageDirectory", meta: { category: "storage", signalKey: "accessStorage", api: "android.os.Environment.getExternalStorageDirectory", description: "read external storage path" } },
