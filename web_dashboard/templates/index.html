@@ -241,7 +241,7 @@
         }
 
         function translateRisk(risk) {
-            const map = { 'high': '高危', 'medium': '中危', 'low': '低危' };
+            const map = { 'high': '涉嫌高危违规APP', 'medium': '中度越界风险APP', 'low': '合规应用' };
             return map[risk] || risk;
         }
 
@@ -569,19 +569,17 @@
             }
 
             apps.forEach(app => {
-                // 计算健康分: 满分100，根据risk_score扣分。假设最恶劣达到100分。
-                let score = Math.max(0, 100 - normalizeScore(app.risk_score));
                 let healthClass = 'circle-success';
-                let healthText = '健康合规';
+                let healthText = '合规应用';
                 let textClass = 'text-success';
                 
-                if (score < 60) {
+                if (app.risk_level === 'high') {
                     healthClass = 'circle-danger';
-                    healthText = '存在风险';
+                    healthText = '涉嫌高危违规APP';
                     textClass = 'text-danger';
-                } else if (score < 85) {
+                } else if (app.risk_level === 'medium') {
                     healthClass = 'circle-warning';
-                    healthText = '建议关注';
+                    healthText = '中度越界风险APP';
                     textClass = 'text-warning';
                 }
 
@@ -591,7 +589,7 @@
                             <div class="card-body text-center py-4">
                                 <h5 class="card-title fw-bold text-dark mb-4">${app.apk_file.replace('.apk','')}</h5>
                                 <div class="health-circle ${healthClass} mb-3 shadow-sm">
-                                    <span class="health-score">${score}</span>
+                                    <span class="health-score">${normalizeScore(app.risk_score)}</span>
                                 </div>
                                 <h5 class="${textClass} fw-bold">${healthText}</h5>
                                 <p class="text-muted small mt-3 px-2">发现 <strong class="text-danger">${app.high_risk_permissions || 0}</strong> 项极高危权限<br>
@@ -614,7 +612,7 @@
             const ctx = document.getElementById('riskChart');
             if (riskChart) riskChart.destroy();
             const values = [data.high_risk || 0, data.medium_risk || 0, data.low_risk || 0];
-            const labels = values.every(v=>v===0) ? ['无数据'] : ['高危', '中危', '合规'];
+            const labels = values.every(v=>v===0) ? ['无数据'] : ['涉嫌高危违规APP', '中度越界风险APP', '合规应用'];
             const graphData = values.every(v=>v===0) ? [1] : values;
             const colors = values.every(v=>v===0) ? ['#e9ecef'] : ['#dc3545', '#ffc107', '#198754'];
             riskChart = new Chart(ctx, {
@@ -731,31 +729,25 @@
                         const frida = dynamicAnalysis.frida_analysis;
                         const fridaStatus = getFridaDisplayStatus(dynamicAnalysis);
                         dynamicHtml += `<div class="p-3 bg-white border border-info rounded shadow-sm">
-                            <h6 class="text-info fw-bold mb-3"><span class="fs-5">💉</span> Frida 深度探针检测结果</h6>`;
-                        if (fridaStatus.level !== 'error') {
-                            dynamicHtml += `
-                                <div class="d-flex gap-3">
-                                    <div class="badge bg-secondary p-2 px-3 fs-6 rounded-pill">拦截 API 调用: <span class="text-warning">${frida.summary?.total_api_calls || 0} 次</span></div>
-                                    <div class="badge bg-secondary p-2 px-3 fs-6 rounded-pill">命中敏感类: <span class="text-warning">${frida.summary?.total_hooked_apis || 0} 个</span></div>
-                                    <div class="badge bg-secondary p-2 px-3 fs-6 rounded-pill">侦测时长: <span class="text-info">${parseFloat(frida.summary?.duration || 0).toFixed(1)} s</span></div>
-                                </div>
-                            `;
-                            if (fridaStatus.message && fridaStatus.level === 'warning') {
-                                dynamicHtml += `<p class="text-warning mt-3 mb-0">${escapeHtml(fridaStatus.message)}</p>`;
-                            } else if (fridaStatus.message && fridaStatus.level === 'muted') {
-                                dynamicHtml += `<p class="text-muted mt-3 mb-0">${escapeHtml(fridaStatus.message)}</p>`;
-                            } else if (!(frida.summary?.total_api_calls > 0)) {
-                                dynamicHtml += `<p class="text-muted mt-3 mb-0">本次 Frida 深度探针未拦截到敏感 API 调用。</p>`;
-                            }
-                        } else {
-                            dynamicHtml += `<p class="text-danger mb-2">探针注入失败或未进入 Java Hook 阶段: ${escapeHtml(fridaStatus.message)}</p>`;
-                        }
-                        dynamicHtml += `</div>`;
+                            <h6 class="text-info fw-bold mb-3"><span class="fs-5">💉</span> Frida 深度探针检测结果</h6>
+                            <div class="d-flex gap-3">
+                                <div class="badge bg-secondary p-2 px-3 fs-6 rounded-pill">拦截 API 调用: <span class="text-warning">${frida.summary?.total_api_calls || 0} 次</span></div>
+                                <div class="badge bg-secondary p-2 px-3 fs-6 rounded-pill">命中敏感类: <span class="text-warning">${frida.summary?.total_hooked_apis || 0} 个</span></div>
+                                <div class="badge bg-secondary p-2 px-3 fs-6 rounded-pill">侦测时长: <span class="text-info">${parseFloat(frida.summary?.duration || 0).toFixed(1)} s</span></div>
+                            </div>
+                            ${!(frida.summary?.total_api_calls > 0) ? `<p class="text-muted mt-3 mb-0">本次 Frida 深度探针未拦截到敏感 API 调用。</p>` : ''}
+                        </div>`;
                     }
                 }
                 
                 const cnRisk = translateRisk(app.risk_assessment?.risk_level);
                 const score = normalizeScore(app.risk_assessment?.total_score);
+                const detectedFindings = app.risk_assessment?.detected_findings || [];
+                const findingsHtml = detectedFindings.length ? `
+                    <div class="alert alert-warning border-warning mt-3 mb-0">
+                        <strong>系统独立检测问题：</strong>${detectedFindings.map(item => escapeHtml(item.issue_name || item.issue_category || '未命名问题')).join('；')}
+                    </div>
+                ` : '';
 
                 content.innerHTML = `
                     <div class="row g-4">
@@ -773,6 +765,7 @@
                                             <strong>违法量化积分：</strong> <span class="text-danger fw-bold fs-4">${score}</span>
                                         </li>
                                     </ul>
+                                    ${findingsHtml}
                                 </div>
                             </div>
                         </div>
@@ -857,17 +850,19 @@
             }
 
             const fridaSummary = dyn?.frida_analysis?.summary || {};
-            const fridaStatus = getFridaDisplayStatus(dyn);
             let fridaHeadline = '本次 Frida 深度探针未拦截到敏感 API 调用。';
-            if (fridaStatus.message && fridaStatus.level === 'error') {
-                fridaHeadline = `探针注入遭遇应用对抗防御或未进入 Java Hook 阶段，错误日志：${escapeHtml(fridaStatus.message)}`;
-            } else if (fridaStatus.message && fridaStatus.level === 'warning') {
-                fridaHeadline = `Java Hook 已进入敏感 API 监控阶段，但目标进程在运行中退出：${escapeHtml(fridaStatus.message)}`;
-            } else if ((fridaSummary.total_api_calls || 0) > 0) {
+            if ((fridaSummary.total_api_calls || 0) > 0) {
                 fridaHeadline = `拦截到敏感调用 <b>${normalizeScore(fridaSummary.total_api_calls || 0)}</b> 次，归并为 <b>${normalizeScore(fridaSummary.total_hooked_signals || fridaSummary.total_hooked_apis || 0)}</b> 类信号。`;
             }
             const fridaRows = buildFridaTableRows(dyn);
             const fridaLogRows = buildFridaLogRows(dyn);
+            const detectedFindings = app.risk_assessment?.detected_findings || [];
+            const detectedFindingsMeta = detectedFindings.length
+                ? `<p><strong>系统独立检测问题数：</strong> <span class="danger">${detectedFindings.length}</span></p>`
+                : '';
+            const detectedFindingsConclusion = detectedFindings.length
+                ? `系统独立检测发现 ${detectedFindings.length} 类风险问题，相关证据可用于与监管通报或人工复核结论进行比对验证。`
+                : '系统本次未形成明确风险问题结论。';
 
             const thirdPartySdks = app.static_analysis?.third_party_sdks || [];
             const appFrameworks = app.static_analysis?.app_frameworks || [];
@@ -930,6 +925,7 @@
                         <p><strong>检材名称：</strong> ${app.apk_file || '未提供'}</p>
                         <p><strong>应用包名：</strong> ${app.package_name || '未提供'}</p>
                         <p><strong>研判结论定级：</strong> <span class="${app.risk_assessment?.risk_level === 'high' ? 'danger' : ''}">评估为 ${translateRisk(app.risk_assessment?.risk_level)} （总侵害定损评分：${app.risk_assessment?.total_score || 0} 分）</span></p>
+                        ${detectedFindingsMeta}
                     </div>
 
                     <h2>一、 静态拆包与敏感权限声明分析</h2>
@@ -1005,7 +1001,7 @@
                     </table>
 
                     <h2>四、 综合研判结论</h2>
-                    <p>依据《APP违法违规收集使用个人信息行为认定方法》等相关规定，结合上述静态签名和动态沙箱行为分析，该程序存在<b>${translateRisk(app.risk_assessment?.risk_level)}</b>。建议相关办案单位以此报告为线索，对涉及的后台服务器 IP 及数据流向开展进一步溯源打击。</p>
+                    <p>依据《APP违法违规收集使用个人信息行为认定方法》等相关规定，结合上述静态签名和动态沙箱行为分析，该程序存在<b>${translateRisk(app.risk_assessment?.risk_level)}</b>。${detectedFindingsConclusion}建议相关办案单位以此报告为线索，对涉及的后台服务器 IP 及数据流向开展进一步溯源打击。</p>
 
                     <div class="footer">
                         <p>出证系统：全景隐私安全预警与电子取证平台</p>

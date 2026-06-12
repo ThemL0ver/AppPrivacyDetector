@@ -1,7 +1,25 @@
-# 基于GBT+41391-2022标准的应用类型和必要个人信息分类
+"""
+基于 GB/T 41391-2022《信息安全技术 移动互联网应用程序（App）收集个人信息基本要求》标准的
+应用类型定义、必要个人信息范围分类以及权限风险等级评估模块。
+
+本模块提供以下核心功能：
+1. 根据应用包名自动识别应用类型（如地图导航、即时通讯、网络支付等）
+2. 定义各类型应用的必要个人信息（权限）范围
+3. 判断给定权限属于"必要个人信息"还是"非必要个人信息"
+4. 支持权限风险等级映射与风险评分权重体系
+
+主要数据结构：
+- APP_TYPES：应用类型 → 已知包名列表的映射
+- NECESSARY_INFO：应用类型 → 必要权限列表及中文描述的映射
+- PERMISSION_RISK_LEVELS：风险等级名称 → 风险权重的映射
+- CONTEXTUAL_PERMISSION_DOMAINS：分业务场景的可解释敏感权限域
+- SENSITIVE_API_WEIGHTS：敏感 API 类别 → 风险权重的映射
+"""
+
 from typing import Dict, List, Set
 
-# 应用类型定义
+# ======================== 应用类型定义 ========================
+# 根据 GB/T 41391-2022 附录A 划分的应用服务类型，每类下列出代表性的已知包名
 APP_TYPES = {
     # 地图导航类
     'map': ['com.baidu.BaiduMap', 'com.autonavi.minimap', 'com.tencent.map'],
@@ -91,7 +109,11 @@ APP_TYPES = {
     'other': []
 }
 
-# 不同类型应用的必要个人信息范围（基于GBT+41391-2022附录A）
+# ======================== 必要个人信息定义 ========================
+# 依据 GB/T 41391-2022 附录A，定义每种应用类型的必要个人信息（即必要权限）范围
+# 每个条目包含：
+#   - permissions：该类型应用为实现基本功能所必需声明的权限列表
+#   - description：对该类型应用所需个人信息的中文描述
 NECESSARY_INFO = {
     'map': {
         'permissions': [
@@ -571,7 +593,8 @@ NECESSARY_INFO = {
     }
 }
 
-# 权限风险等级映射
+# ======================== 权限风险等级映射 ========================
+# 将中文风险等级映射为数值权重，用于后续风险评分计算
 PERMISSION_RISK_LEVELS = {
     '极高': 5,
     '高': 3,
@@ -582,16 +605,29 @@ PERMISSION_RISK_LEVELS = {
 
 def get_app_type(package_name: str) -> str:
     """
-    根据包名判断应用类型
+    根据应用包名自动识别其所属的应用类型。
+
+    识别策略分两层：
+    1. 精确匹配：遍历 APP_TYPES 字典，检查包名是否包含已知包名
+    2. 关键词匹配：若精确匹配失败，则基于包名中的关键词（如 wechat、taobao 等）
+       进行模糊识别
+
+    参数:
+        package_name (str): Android 应用的完整包名，如 "com.tencent.mm"
+
+    返回:
+        str: 应用类型标识符，如 'instant_messaging'、'map'、'shopping' 等
+              若无法识别则返回 'other'
     """
     package_name_lower = package_name.lower()
     
+    # 第一层：遍历已知包名列表进行精确匹配
     for app_type, packages in APP_TYPES.items():
         for pkg in packages:
             if pkg.lower() in package_name_lower:
                 return app_type
     
-    # 基于包名特征的补充识别
+    # 第二层：基于包名特征关键词进行模糊匹配
     if 'wechat' in package_name_lower or 'wx' in package_name_lower:
         return 'instant_messaging'
     elif 'wework' in package_name_lower:
@@ -635,7 +671,19 @@ def get_app_type(package_name: str) -> str:
 
 def get_permission_category(app_type: str, permission: str) -> str:
     """
-    判断权限类别：必要个人信息、非必要但有关联个人信息、无关个人信息
+    判断某个权限对于指定应用类型来说属于哪个类别。
+
+    根据 GB/T 41391-2022 的分类标准，将权限分为：
+    - 'necessary'：必要个人信息对应的权限，是实现基本功能所必需的
+    - 'non_necessary'：非必要个人信息对应的权限，超出基本功能所需
+
+    参数:
+        app_type (str): 应用类型标识符，如 'map'、'shopping' 等
+        permission (str): Android 权限全名，如 'android.permission.CAMERA'
+
+    返回:
+        str: 权限类别，'necessary' 或 'non_necessary'
+              若 app_type 不在 NECESSARY_INFO 中，默认返回 'non_necessary'
     """
     if app_type not in NECESSARY_INFO:
         return 'non_necessary'
@@ -649,19 +697,31 @@ def get_permission_category(app_type: str, permission: str) -> str:
 
 def is_risky_permission(permission: str, risk_level: str) -> bool:
     """
-    判断是否为高风险权限
+    判断某个权限是否属于高风险权限。
+
+    当权限的风险等级为 '高'、'极高' 或 '中高' 时，视为高风险权限。
+
+    参数:
+        permission (str): Android 权限全名
+        risk_level (str): 权限的风险等级，如 '高'、'中'、'低' 等
+
+    返回:
+        bool: 是否为高风险权限
     """
     return risk_level in ['高', '极高', '中高']
 
-# 权限类别权重
+# ======================== 权限类别权重 ========================
+# 必要个人信息在风险评分中权重为 0（不参与风险累加）
+# 非必要个人信息权重为 1，全额计入风险评分
 PERMISSION_CATEGORY_WEIGHTS = {
-    'necessary': 0,  # 必要个人信息不计算风险
-    'non_necessary': 1  # 非必要个人信息计算风险
+    'necessary': 0,
+    'non_necessary': 1
 }
 
-# 分业务场景可解释的敏感权限域。
-# 这些域不会被直接判定为合规，但会作为“业务相关、需持续关注”的信号，
-# 用于避免主流应用因同类功能权限重复声明而被线性累加到极端高分。
+# ======================== 分业务场景敏感权限域 ========================
+# 某些权限域在特定业务场景下是合理的（如视频应用需要相机和麦克风）
+# 这些域不会被直接判定为违规，但会标记为"需要持续关注"的信号
+# 目的是避免主流应用因同类功能权限的重复声明而被线性累加到极端高分
 CONTEXTUAL_PERMISSION_DOMAINS = {
     'browser': {'location', 'camera', 'microphone', 'storage', 'notification', 'account'},
     'video': {'location', 'camera', 'microphone', 'storage', 'notification', 'biometric'},
@@ -681,22 +741,25 @@ CONTEXTUAL_PERMISSION_DOMAINS = {
     'health_management': {'location', 'camera', 'microphone', 'storage', 'notification', 'account', 'phone', 'biometric'}
 }
 
-# 敏感API类别权重
+# ======================== 敏感 API 类别权重 ========================
+# 动态 Hook 捕获的各类敏感 API 调用的风险权重
+# 权重越高表示该类别 API 被滥用时带来的隐私风险越大
 SENSITIVE_API_WEIGHTS = {
-    'location': 2.0,
-    'contacts': 2.0,
-    'camera': 1.5,
-    'microphone': 1.5,
-    'storage': 1.0,
-    'phone': 2.0,
-    'sms': 2.0,
-    'account': 1.5,
-    'network': 1.0
+    'location': 2.0,       # 位置信息 → 极高敏感度
+    'contacts': 2.0,       # 联系人 → 极高敏感度
+    'camera': 1.5,         # 相机 → 高敏感度
+    'microphone': 1.5,     # 麦克风 → 高敏感度
+    'storage': 1.0,        # 存储 → 中敏感度
+    'phone': 2.0,          # 电话/设备标识 → 极高敏感度
+    'sms': 2.0,            # 短信 → 极高敏感度
+    'account': 1.5,        # 账户信息 → 高敏感度
+    'network': 1.0         # 网络 → 中敏感度
 }
 
-# 风险等级阈值
+# ======================== 风险评分阈值 ========================
+# 根据最终风险评分将应用划分为三个风险等级
 RISK_THRESHOLDS = {
-    'high': 70,
-    'medium': 38,
-    'low': 0
+    'high': 70,    # 高风险：评分 >= 70
+    'medium': 38,  # 中风险：评分 >= 38 且 < 70
+    'low': 0       # 低风险：评分 < 38
 }

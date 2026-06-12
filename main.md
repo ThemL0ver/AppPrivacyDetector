@@ -80,6 +80,18 @@
 .venv\Scripts\python.exe main.py --only-integrated --dynamic-timeout-per-apk 300 --manual-probe-seconds 120 --low-coverage-api-threshold 5 --manual-probe-apks Mooc.apk
 ```
 
+针对当前 4 个官方通报问题 APK 的批量验证场景，推荐：
+
+```powershell
+.venv\Scripts\python.exe main.py --dynamic-timeout-per-apk 360 --manual-probe-seconds 60 --low-coverage-api-threshold 10 --manual-probe-apks "六只脚 4.19.6.apk,票豆 2.3.17.apk,闪电修 2.9.9.apk" --clear-app-data-after-analysis
+```
+
+说明：
+
+- `万达贷  25.12.1.apk` 不建议放入人工补采列表。实测该样本多次重启后更容易只留下反调试类 native guard 证据，反而可能降低运行时证据质量。
+- `六只脚 4.19.6.apk`、`票豆 2.3.17.apk`、`闪电修 2.9.9.apk` 可通过 60 秒低覆盖补采增加 Frida 记录数量。
+- `--clear-app-data-after-analysis` 建议开启，避免上一轮样本进程、缓存或登录态影响下一轮分析。
+
 ## 6. 新增参数补充
 
 - `--clear-app-data-after-analysis`
